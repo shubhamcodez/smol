@@ -1,5 +1,7 @@
 # AGI model
 
+Trying to make world's smallest viable model - the goal is to apply federated learning to train the model on smallest compute possible and compile to superintelligence.
+
 `model.py` defines a 203,821,824-parameter decoder-only Transformer targeted at
 training and inference on an RTX 3070 with 6GB VRAM. Its maximum context length
 is 4,096 tokens. The CUDA path cannot be hardware-verified on the Snapdragon
