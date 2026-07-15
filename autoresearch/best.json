@@ -1,0 +1,9 @@
+{
+  "hidden_dim": 96,
+  "learning_rate": 0.0014,
+  "weight_decay": 0.01,
+  "batch_size": 64,
+  "beta1": 0.9,
+  "beta2": 0.999,
+  "seed": 1337
+}

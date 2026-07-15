@@ -1,0 +1,35 @@
+{
+  "backend": "qnn-npu",
+  "device": {
+    "execution_provider": "QNNExecutionProvider",
+    "hardware_type": "NPU",
+    "vendor": "Qualcomm",
+    "device_id": "1093682224"
+  },
+  "cpu_ep_fallback_disabled": true,
+  "provider_options": {
+    "backend_path": "D:\\AGI\\.venv-arm64\\Lib\\site-packages\\onnxruntime_qnn\\QnnHtp.dll",
+    "htp_performance_mode": "burst"
+  },
+  "compile_seconds": 1.9085911000001943,
+  "latency_ms": 0.05074400000012247,
+  "iterations": 100,
+  "output_shape": [
+    32,
+    32
+  ],
+  "output_checksum": -10.531170845031738,
+  "onnxruntime_version": "1.24.4",
+  "qnn_plugin_version": "2.4.0",
+  "runtime_inventory": {
+    "python_machine": "ARM64",
+    "qnn_npu": true,
+    "qnn_gpu": true,
+    "cuda": false,
+    "cuda_device": null,
+    "torch_version": null,
+    "onnxruntime_version": "1.24.4",
+    "qnn_plugin_version": "2.4.0"
+  },
+  "model": "D:\\AGI\\autoresearch\\artifacts\\npu_smoke\\candidate_qdq.onnx"
+}

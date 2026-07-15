@@ -1,0 +1,53 @@
+{
+  "run_id": "20260715T231222Z-trial04-cac547e501",
+  "score": 1.2675365658719056,
+  "validation_loss": 1.2665939331054688,
+  "parameter_count": 7792,
+  "training_backend": "cpu",
+  "training_seconds": 1.0010409999995318,
+  "training_steps": 1042,
+  "deployment": {
+    "backend": "qnn-npu",
+    "device": {
+      "execution_provider": "QNNExecutionProvider",
+      "hardware_type": "NPU",
+      "vendor": "",
+      "device_id": "1093682224"
+    },
+    "cpu_ep_fallback_disabled": true,
+    "provider_options": {
+      "backend_path": "D:\\AGI\\.venv-arm64\\Lib\\site-packages\\onnxruntime_qnn\\QnnHtp.dll",
+      "htp_performance_mode": "burst"
+    },
+    "compile_seconds": 2.531542199998512,
+    "latency_ms": 0.08514799999829847,
+    "iterations": 100,
+    "output_shape": [
+      32,
+      16
+    ],
+    "output_checksum": -437.101318359375,
+    "onnxruntime_version": "1.24.4",
+    "qnn_plugin_version": "2.4.0"
+  },
+  "candidate": {
+    "hidden_dim": 96,
+    "learning_rate": 0.0014,
+    "weight_decay": 0.00333333,
+    "batch_size": 64,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "seed": 1337
+  },
+  "runtime_inventory": {
+    "python_machine": "ARM64",
+    "qnn_npu": true,
+    "qnn_gpu": true,
+    "cuda": false,
+    "cuda_device": null,
+    "torch_version": null,
+    "onnxruntime_version": "1.24.4",
+    "qnn_plugin_version": "2.4.0"
+  },
+  "quantized_model": "D:\\AGI\\autoresearch\\artifacts\\20260715T231222Z-trial04-cac547e501\\candidate_qdq.onnx"
+}

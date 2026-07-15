@@ -1,0 +1,40 @@
+{
+  "accepted_trials": 3,
+  "attempted_trials": 4,
+  "best_score": 1.2313972678210567,
+  "best_validation_loss": 1.2304675579071045,
+  "best_deployment": {
+    "backend": "qnn-npu",
+    "device": {
+      "execution_provider": "QNNExecutionProvider",
+      "hardware_type": "NPU",
+      "vendor": "",
+      "device_id": "1093682224"
+    },
+    "cpu_ep_fallback_disabled": true,
+    "provider_options": {
+      "backend_path": "D:\\AGI\\.venv-arm64\\Lib\\site-packages\\onnxruntime_qnn\\QnnHtp.dll",
+      "htp_performance_mode": "burst"
+    },
+    "compile_seconds": 2.522307600000204,
+    "latency_ms": 0.07815900000423426,
+    "iterations": 100,
+    "output_shape": [
+      32,
+      16
+    ],
+    "output_checksum": -156.25991821289062,
+    "onnxruntime_version": "1.24.4",
+    "qnn_plugin_version": "2.4.0"
+  },
+  "best_candidate": {
+    "hidden_dim": 96,
+    "learning_rate": 0.0014,
+    "weight_decay": 0.01,
+    "batch_size": 64,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "seed": 1337
+  },
+  "ledger": "D:\\AGI\\autoresearch\\results.tsv"
+}
