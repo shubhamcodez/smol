@@ -1,4 +1,4 @@
-# AGI model
+# smol
 
 Trying to make world's smallest viable model - the goal is to apply federated learning to train the model on smallest compute possible and compile to superintelligence.
 
