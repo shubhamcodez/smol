@@ -11,3 +11,8 @@ build/
 .env
 .idea/
 .vscode/
+artifacts/
+results.tsv
+results.*.tsv
+best.*.json
+*.onnx

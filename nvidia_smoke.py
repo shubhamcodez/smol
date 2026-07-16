@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
-from pathlib import Path
 
 import torch
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from model import ModelConfig, TransformerLM  # noqa: E402
+from model import ModelConfig, TransformerLM
 
 
 def main() -> None:

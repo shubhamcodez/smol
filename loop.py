@@ -125,7 +125,7 @@ def evaluate(
     ]
     completed = subprocess.run(
         command,
-        cwd=ROOT.parent,
+        cwd=ROOT,
         text=True,
         capture_output=True,
         timeout=max(180.0, budget_seconds + 150.0),

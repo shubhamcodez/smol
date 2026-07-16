@@ -52,10 +52,23 @@ and train faster without changing the model weights.
 On the NVIDIA computer, verify checkpointed training and cached inference with:
 
 ```powershell
-python .\autoresearch\nvidia_smoke.py
-python .\autoresearch\nvidia_smoke.py --full --sequence-length 4096
+python .\nvidia_smoke.py
+python .\nvidia_smoke.py --full --sequence-length 4096
 ```
 
 The first command is a quick CUDA-path check. The second performs one complete
 optimizer step with the default model and reports peak allocated and reserved
 VRAM. Run the full check before beginning a long training job.
+
+## Local autoresearch loop
+
+A small adaptation of Andrej Karpathy's autoresearch pattern: fixed evaluator,
+equal wall-clock experiments, append-only ledger, keep/discard decisions, plus a
+CUDA/CPU deployment timing gate. See `program.md` for the operating contract.
+
+```powershell
+python -m pip install -r .\requirements.txt
+python .\nvidia_smoke.py
+python .\loop.py --reset --iterations 8 --budget-seconds 5 --training-backend cuda --deployment cuda
+python .\audit.py --expected-deployment cuda
+```
