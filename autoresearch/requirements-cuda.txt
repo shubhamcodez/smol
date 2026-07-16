@@ -1,4 +1,0 @@
-numpy>=2.0
-onnx>=1.19
-onnxruntime-gpu>=1.22
-torch>=2.5

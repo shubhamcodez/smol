@@ -179,7 +179,7 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--budget-seconds", type=float, default=1.0)
     parser.add_argument("--training-backend", choices=["auto", "cpu", "cuda"], default="auto")
-    parser.add_argument("--deployment", choices=["auto", "qnn-npu", "cuda", "cpu"], default="auto")
+    parser.add_argument("--deployment", choices=["auto", "cuda", "cpu"], default="auto")
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 

@@ -1,4 +1,0 @@
-numpy>=2.0
-onnx>=1.19,<1.23
-onnxruntime==1.24.4
-onnxruntime-qnn==2.4.0
