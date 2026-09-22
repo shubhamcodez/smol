@@ -165,39 +165,121 @@ def validate_source(source: str) -> None:
         raise RuntimeError("proposal must not rewrite the fixed score")
 
 
-def propose_architecture(
+def choose_method_query(
     api_key: str,
-    model_src: str,
+    *,
+    model: str,
+    results_tail: str,
+    papers_tail: str,
+    avoid: str = "",
+) -> str:
+    """Ask for a search query. The arXiv id comes from search, not from the model."""
+    avoid_note = f"\nDo not search for: {avoid}\n" if avoid else ""
+    reply = chat(
+        api_key,
+        model,
+        [
+            {
+                "role": "system",
+                "content": (
+                    "You pick a literature search for one method that could lower a small "
+                    "language model's pretrain score (bits-per-byte plus benchmark error). "
+                    "Methods include attention, feed-forward, normalization, position encoding, "
+                    "and initialization from models such as Kimi, Qwen, Mistral, DeepSeek, or Gemma. "
+                    "Do not invent an arXiv id. Reply with one line: QUERY: <search words>"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Recent results:\n{results_tail}\n\n"
+                    f"Papers already logged:\n{papers_tail}\n"
+                    f"{avoid_note}"
+                    "QUERY:"
+                ),
+            },
+        ],
+    )
+    match = re.search(r"QUERY:\s*(.+)", reply)
+    query = (match.group(1) if match else reply).strip().splitlines()[0]
+    query = re.sub(r"\d{4}\.\d{4,5}", "", query).strip(" :|-")
+    if not query:
+        raise RuntimeError("Grok did not return a method search query")
+    return query[:180]
+
+
+def find_method_paper(
+    api_key: str,
     *,
     model: str = DEFAULT_MODEL,
     results_tail: str = "",
     papers_tail: str = "",
+    known: set[str] | None = None,
+) -> dict[str, str]:
+    """Search papers for a method. The returned arXiv id is from the search hit."""
+    from papers import search_papers
+
+    seen = set(known or ())
+    avoid = ""
+    last_query = ""
+    for _ in range(3):
+        last_query = choose_method_query(
+            api_key,
+            model=model,
+            results_tail=results_tail,
+            papers_tail=papers_tail,
+            avoid=avoid,
+        )
+        hits = search_papers(last_query, limit=15)
+        for hit in hits:
+            if hit["arxiv_id"] in seen:
+                continue
+            return {
+                "arxiv_id": hit["arxiv_id"],
+                "title": hit["title"],
+                "summary": str(hit.get("summary") or ""),
+                "query": last_query,
+                "url": hit["url"],
+            }
+        avoid = last_query
+    raise RuntimeError(f"no unseen paper for method search {last_query!r}")
+
+
+def propose_architecture(
+    api_key: str,
+    model_src: str,
+    paper: dict[str, str],
+    *,
+    model: str = DEFAULT_MODEL,
+    results_tail: str = "",
     candidate_json: str = "",
     best_score: float | None = None,
 ) -> ArchitectureProposal:
+    paper_id = paper["arxiv_id"]
     system = (
         "You edit model.py for a small decoder-only language model trained on FineWeb. "
         "The training loop, score, tokenizer, and data shards are fixed. "
-        "You may change architecture and methods: attention, feed-forward, norms, "
-        "positions, initialization, or a technique from a real paper "
-        "(Kimi, Qwen, Mistral, DeepSeek, Gemma, and similar). "
+        "Implement one method from the paper that was already retrieved by search. "
+        "Do not swap in a different paper or invent an arXiv id. "
         "Do not only retune learning rate, width, depth, or weight decay — those are overridden "
         "by candidate.json. New ModelConfig fields are allowed when they have defaults and the "
         "modules read them from config. Keep the public classes ModelConfig, TransformerLM, "
         "and CausalLMOutput, and the methods forward, configure_optimizer, get_num_params, "
         "and gradient_checkpointing_enable. Vocab size stays 50304. The model must train "
         "with micro-batches on a 6GB GPU. One change only. "
-        "Reply with exactly two header lines and then the complete file:\n"
+        "Reply with one header line and then the complete file:\n"
         "IDEA: one sentence of what this trial changes\n"
-        "PAPER: arxiv_id | short title | one-line summary of the idea being tried\n"
         "```python\n<full model.py>\n```"
     )
+    abstract = (paper.get("summary") or "")[:1200]
     user = (
+        f"Paper from search (id is fixed): {paper_id}\n"
+        f"Title: {paper.get('title', '')}\n"
+        f"Abstract: {abstract}\n\n"
         f"Best score so far (lower is better): {best_score}\n"
         f"Current candidate.json (size and optimizer; do not spend this trial on these knobs):\n"
         f"{candidate_json}\n\n"
         f"Recent results.tsv:\n{results_tail}\n\n"
-        f"Papers already tried (do not repeat a rejected idea):\n{papers_tail}\n\n"
         f"Current model.py:\n```python\n{model_src}\n```"
     )
     reply = chat(
@@ -237,11 +319,11 @@ def propose_architecture(
     if source is None:
         raise RuntimeError("Grok did not return a usable model.py")
     validate_source(source)
-    idea, paper_id, title, summary = _parse_preamble(reply)
+    idea, _ignored_id, _ignored_title, summary = _parse_preamble(reply)
     return ArchitectureProposal(
         source=source,
         idea=idea or "architecture change",
-        paper_id=paper_id,
-        paper_title=title,
+        paper_id=paper["arxiv_id"],
+        paper_title=paper.get("title") or "",
         summary=summary or idea or "architecture change",
     )

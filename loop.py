@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from checkpointing import checkpoint_paths
-from papers import attempt_summaries, normalize_arxiv_id
+from grok_propose import DEFAULT_MODEL, find_method_paper, load_api_key, propose_architecture
+from papers import append_row, known_ids, utc_now
 from scores import record_our_run, seed_references
 
 
@@ -279,13 +280,6 @@ def remember_paper(paper_id: str, title: str, idea: str) -> None:
     )
 
 
-def paper_attempt_line(paper_ids: list[str]) -> str:
-    summaries = attempt_summaries(paper_ids)
-    if not summaries:
-        return ""
-    return " | ".join(summaries)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidate", type=Path, default=ROOT / "candidate.json")
@@ -297,8 +291,6 @@ def main() -> None:
                         help="Warm-start from this checkpoint dir (default: checkpoints/best if present with --resume)")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from --checkpoint-dir (candidate + weights)")
-    parser.add_argument("--paper-id", action="append", default=[],
-                        help="arXiv id informing this session; repeatable")
     parser.add_argument("--proposer", choices=["grok", "grid"], default="grok",
                         help="grok rewrites model.py from a paper; grid walks hyperparameters")
     parser.add_argument("--grok-model", default=DEFAULT_MODEL)
@@ -318,7 +310,6 @@ def main() -> None:
         raise ValueError("budget-seconds must be positive")
     args.artifacts.mkdir(parents=True, exist_ok=True)
 
-    paper_ids = [normalize_arxiv_id(value) for value in args.paper_id]
     seed_references(args.scores)
     api_key = ""
     if args.proposer == "grok":
@@ -367,7 +358,7 @@ def main() -> None:
         args.benchmark_limit,
         args.bpb_batches,
         init_checkpoint,
-        paper_ids,
+        [],
     )
     append_ledger(args.ledger, best_metrics, "baseline", "none")
     record_our_run(args.scores, best_metrics, "baseline")
@@ -383,15 +374,55 @@ def main() -> None:
 
     accepted = 0
     for index in range(args.iterations):
-        proposal, mutation = propose(best, index)
+        trial_papers: list[str] = []
+        architecture_edit = False
+        init_for_trial = args.checkpoint_dir
+        if args.proposer == "grok":
+            try:
+                found = find_method_paper(
+                    api_key,
+                    model=args.grok_model,
+                    results_tail=tail_text(args.ledger),
+                    papers_tail=tail_text(ROOT / "papers.tsv"),
+                    known=known_ids(ROOT / "papers.tsv"),
+                )
+                print(
+                    f"search {found['query']!r} -> {found['arxiv_id']} {found['title']}",
+                    flush=True,
+                )
+                arch = propose_architecture(
+                    api_key,
+                    MODEL_PATH.read_text(encoding="utf-8"),
+                    found,
+                    model=args.grok_model,
+                    results_tail=tail_text(args.ledger),
+                    candidate_json=json.dumps(best, indent=2),
+                    best_score=float(best_metrics["score"]),
+                )
+                MODEL_PATH.write_text(arch.source, encoding="utf-8")
+                architecture_imports()
+            except Exception as error:
+                restore_architecture()
+                run_id = f"{session}-trial{index + 1:02d}-search"
+                append_crash(args.ledger, run_id, "method search", best, error, [])
+                print(f"discard {run_id}: {error}", flush=True)
+                continue
+            proposal = best
+            mutation = arch.idea
+            paper_line = arch.paper_line
+            trial_papers = [arch.paper_id]
+            remember_paper(arch.paper_id, arch.paper_title, arch.summary)
+            architecture_edit = True
+            init_for_trial = None
+        else:
+            proposal, mutation = propose(best, index)
+            paper_line = ""
         run_id = f"{session}-trial{index + 1:02d}-{short_hash(proposal)}"
-        paper_line = paper_attempt_line(paper_ids)
         print(f"Evaluating {run_id}: {mutation}", flush=True)
         if paper_line:
             print(f"  paper {paper_line}", flush=True)
             mutation = f"{mutation} || {paper_line}"
         try:
-            # Warm-start from current best weights when architecture is unchanged.
             metrics = evaluate(
                 args.candidate,
                 proposal,
@@ -401,12 +432,14 @@ def main() -> None:
                 args.training_backend,
                 args.benchmark_limit,
                 args.bpb_batches,
-                args.checkpoint_dir,
-                paper_ids,
+                init_for_trial,
+                trial_papers,
             )
         except Exception as error:
             write_json(args.candidate, best)
-            append_crash(args.ledger, run_id, mutation, proposal, error, paper_ids)
+            if architecture_edit:
+                restore_architecture()
+            append_crash(args.ledger, run_id, mutation, proposal, error, trial_papers)
             print(f"discard {run_id}: evaluator error: {error}", flush=True)
             continue
 
@@ -426,22 +459,41 @@ def main() -> None:
             accepted += 1
             write_json(args.best, best)
             promote_checkpoint(args.artifacts / run_id, args.checkpoint_dir)
-            if paper_ids:
-                for paper_id in paper_ids:
-                    subprocess.run(
-                        [
-                            sys.executable,
-                            str(ROOT / "papers.py"),
-                            "mark",
-                            paper_id,
-                            "--status",
-                            "applied",
-                            "--run-id",
-                            run_id,
-                        ],
-                        cwd=ROOT,
-                        check=False,
-                    )
+            if architecture_edit:
+                accept_architecture()
+            for paper_id in trial_papers:
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "papers.py"),
+                        "mark",
+                        paper_id,
+                        "--status",
+                        "applied",
+                        "--run-id",
+                        run_id,
+                    ],
+                    cwd=ROOT,
+                    check=False,
+                )
+        else:
+            if architecture_edit:
+                restore_architecture()
+            for paper_id in trial_papers:
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "papers.py"),
+                        "mark",
+                        paper_id,
+                        "--status",
+                        "rejected",
+                        "--run-id",
+                        run_id,
+                    ],
+                    cwd=ROOT,
+                    check=False,
+                )
         write_json(args.candidate, best)
 
     summary = {
@@ -452,7 +504,7 @@ def main() -> None:
         "best_mean_benchmark_acc": best_metrics["mean_benchmark_acc"],
         "best_validation_loss": best_metrics["validation_loss"],
         "best_candidate": best,
-        "paper_ids": paper_ids,
+        "proposer": args.proposer,
         "checkpoint": str(args.checkpoint_dir.resolve()),
         "ledger": str(args.ledger.resolve()),
     }

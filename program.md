@@ -15,10 +15,10 @@ log-likelihood. Lower is better.
 Research ideas come from top-venue papers (ICLR, NeurIPS, EMNLP, AAAI, ACL,
 ICML, …), not from unlogged intuition.
 
-1. Search or open a paper (`papers.py search|fetch|next`).
-2. If the arXiv id is already in `papers.tsv`, do **not** re-read or re-try it
-   unless status is being explicitly revisited with new notes.
-3. Log every referred paper before using it (`papers.py log` / `search --log-new`).
+1. The loop asks for a method search, then takes the arXiv id from the search
+   hit. Do not pass an arXiv id on the command line.
+2. If that id is already in `papers.tsv`, skip it and search again.
+3. Log the hit before the trial.
 4. Extract one intelligible mutation. That can be a hyperparameter, or a real
    architecture or method change in `model.py` (attention, feed-forward, norms,
    positions, initialization) drawn from a logged paper — Kimi, Qwen, Mistral,
@@ -37,7 +37,7 @@ ICML, …), not from unlogged intuition.
 - Resume later with:
 
 ```powershell
-python .\loop.py --resume --paper-id 2406.17557 --iterations 4 --budget-seconds 30
+python .\loop.py --resume --iterations 4 --budget-seconds 30 --training-backend cuda
 ```
 
 Architecture-changing mutations skip weight load and train from scratch; optimizer

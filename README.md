@@ -79,7 +79,7 @@ python .\papers.py search "neurips fineweb" --log-new
 python .\papers.py fetch 2406.17557 --markdown
 python .\papers.py log 2406.17557 --venue neurips --status read --idea "edu quality filter"
 python .\loop.py --proposer grok --iterations 4 --budget-seconds 30 --training-backend cuda
-python .\loop.py --proposer grid --resume --paper-id 2406.17557 --iterations 4 --budget-seconds 30 --training-backend cuda
+python .\loop.py --proposer grid --resume --iterations 4 --budget-seconds 30 --training-backend cuda
 python .\papers.py list
 python .\scores.py seed
 python .\scores.py compare
