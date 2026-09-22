@@ -6,16 +6,18 @@ selected modern decoder features:
 * pre-normalized RMSNorm transformer blocks
 * rotary position embeddings (RoPE)
 * grouped-query attention (GQA)
+* QK-Norm (RMSNorm on queries and keys; Dehghani et al. 2023 / Gemma 2)
 * PyTorch scaled-dot-product/Flash Attention when available
 * a gated SwiGLU feed-forward network
 * tied token embedding and output weights
 * memory-efficient KV caching for autoregressive generation
 * residual-projection initialization scaled by model depth
 
-The default configuration has 203,821,824 trainable parameters and a 4,096
-token context window. It targets full-parameter mixed-precision training on a
-6GB RTX 3070 with micro-batch size 1 and gradient checkpointing. A tokenizer,
-dataset, training loop, and trained weights are still required.
+The default configuration has 203,821,824 trainable parameters plus a small
+QK-Norm overhead, and a 4,096 token context window. It targets full-parameter
+mixed-precision training on a 6GB RTX 3070 with micro-batch size 1 and
+gradient checkpointing. A tokenizer, dataset, training loop, and trained
+weights are still required.
 """
 
 from __future__ import annotations
@@ -47,7 +49,8 @@ class ModelConfig:
     vocab_size: int = 50_304
     max_seq_len: int = 4_096
 
-    # Default architecture: 203,821,824 parameters with tied embeddings.
+    # Default architecture: 203,821,824 parameters with tied embeddings
+    # (plus 2 * n_layer * head_dim QK-Norm scale parameters).
     n_layer: int = 24
     n_embd: int = 768
     n_head: int = 12
@@ -59,6 +62,7 @@ class ModelConfig:
     dropout: float = 0.0
     bias: bool = False
     tie_embeddings: bool = True
+    qk_norm: bool = True
 
     def __post_init__(self) -> None:
         if self.n_embd % self.n_head != 0:
@@ -145,6 +149,9 @@ class GroupedQueryAttention(nn.Module):
         self.o_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.rope = RotaryEmbedding(self.head_dim, config.rope_theta)
+        # QK-Norm: RMSNorm over head_dim for Q and K (ViT-22B / Gemma 2).
+        self.q_norm = RMSNorm(self.head_dim, config.norm_eps) if config.qk_norm else None
+        self.k_norm = RMSNorm(self.head_dim, config.norm_eps) if config.qk_norm else None
 
     def forward(
         self,
@@ -164,6 +171,11 @@ class GroupedQueryAttention(nn.Module):
         v = self.v_proj(x).view(
             batch_size, sequence_len, self.n_kv_head, self.head_dim
         ).transpose(1, 2)
+
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
 
         positions = torch.arange(
             past_len,
@@ -524,7 +536,8 @@ def default_parameter_count() -> int:
     )
     mlp = 3 * config.n_embd * config.intermediate_size
     norms_per_layer = 2 * config.n_embd
-    transformer = config.n_layer * (attention + mlp + norms_per_layer)
+    qk_norm = 2 * head_dim if config.qk_norm else 0
+    transformer = config.n_layer * (attention + mlp + norms_per_layer + qk_norm)
     final_norm = config.n_embd
     output = 0 if config.tie_embeddings else embedding
     return embedding + transformer + final_norm + output

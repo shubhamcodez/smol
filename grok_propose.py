@@ -96,9 +96,15 @@ def chat(
     timeout: float = 300.0,
     max_tokens: int = 16000,
 ) -> str:
-    payload = json.dumps(
-        {"model": model, "temperature": 0.3, "max_tokens": max_tokens, "messages": messages}
-    ).encode("utf-8")
+    body = {
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "reasoning_effort": "low",
+        "stream": True,
+        "messages": messages,
+    }
+    payload = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(
         XAI_URL,
         data=payload,
@@ -108,31 +114,49 @@ def chat(
         },
         method="POST",
     )
-    data = None
+    text = ""
     last_error: Exception | None = None
     for attempt in range(3):
+        content: list[str] = []
+        reasoning: list[str] = []
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            break
+                for raw in response:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    chunk = json.loads(data)
+                    delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                    piece = delta.get("content")
+                    thought = delta.get("reasoning_content")
+                    if isinstance(piece, str):
+                        content.append(piece)
+                    if isinstance(thought, str):
+                        reasoning.append(thought)
+            text = "".join(content).strip()
+            if not text:
+                text = "".join(reasoning).strip()
+            if text:
+                break
+            last_error = RuntimeError("xAI returned an empty message")
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")[:800]
             if error.code not in {408, 429, 500, 502, 503, 504} or attempt == 2:
                 raise RuntimeError(f"xAI HTTP {error.code}: {detail}") from error
             last_error = error
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, json.JSONDecodeError) as error:
             last_error = error
             if attempt == 2:
                 raise RuntimeError(f"xAI request failed: {error}") from error
         time.sleep(2.0 * (attempt + 1))
-    if data is None:
+    if not text:
         raise RuntimeError(f"xAI request failed: {last_error}")
     runs = ROOT / "runs"
     runs.mkdir(exist_ok=True)
-    (runs / "last_api_response.json").write_text(json.dumps(data)[:2_000_000], encoding="utf-8")
-    text = _message_text(data["choices"][0]["message"])
-    if not text.strip():
-        raise RuntimeError("xAI returned an empty message")
+    (runs / "last_api_response.json").write_text(text[:2_000_000], encoding="utf-8")
     return text
 
 
@@ -163,22 +187,26 @@ def apply_unified_diff(original: str, diff: str) -> str:
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
+    # Own repo so apply does not prefix paths with the parent checkout.
+    subprocess.run(["git", "init", "-q"], cwd=work, check=True, capture_output=True)
     target = work / "model.py"
-    target.write_text(original, encoding="utf-8", newline="\n")
+    original_lf = original.replace("\r\n", "\n")
     last_error = ""
     for strip in (1, 0):
-        target.write_text(original, encoding="utf-8", newline="\n")
+        target.write_text(original_lf, encoding="utf-8", newline="\n")
         completed = subprocess.run(
             ["git", "apply", "--whitespace=nowarn", f"-p{strip}"],
-            input=diff,
+            input=diff.replace("\r\n", "\n").encode("utf-8"),
             cwd=work,
-            text=True,
             capture_output=True,
             check=False,
         )
         if completed.returncode == 0 and target.exists():
-            return target.read_text(encoding="utf-8")
-        last_error = (completed.stderr or completed.stdout)[-500:]
+            patched = target.read_text(encoding="utf-8")
+            shutil.rmtree(work, ignore_errors=True)
+            return patched
+        last_error = (completed.stderr or completed.stdout).decode("utf-8", errors="replace")[-500:]
+    shutil.rmtree(work, ignore_errors=True)
     raise RuntimeError(last_error or "git apply failed")
 
 
@@ -187,25 +215,42 @@ def _parse_preamble(text: str) -> tuple[str, str, str, str]:
     paper_id = ""
     title = ""
     summary = ""
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.upper().startswith("IDEA:"):
-            idea = stripped.split(":", 1)[1].strip()
-        elif stripped.upper().startswith("PAPER:"):
-            body = stripped.split(":", 1)[1].strip()
+        upper = stripped.upper()
+        if upper == "IDEA" or upper.startswith("IDEA:"):
+            idea = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+            if not idea:
+                for follow in lines[index + 1 :]:
+                    follow = follow.strip()
+                    if not follow:
+                        continue
+                    if follow.upper().startswith("PAPER") or follow.startswith("```"):
+                        break
+                    idea = follow
+                    break
+        elif upper == "PAPER" or upper.startswith("PAPER:"):
+            body = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+            if not body:
+                for follow in lines[index + 1 :]:
+                    follow = follow.strip()
+                    if follow and not follow.startswith("```"):
+                        body = follow
+                        break
             parts = [part.strip() for part in body.split("|")]
-            if parts:
+            if parts and parts[0]:
                 match = re.search(r"\d{4}\.\d{4,5}", parts[0])
                 paper_id = match.group(0) if match else ""
                 title = parts[1] if len(parts) > 1 else parts[0]
                 summary = parts[2] if len(parts) > 2 else idea
             break
-        if stripped.startswith("```"):
+        elif stripped.startswith("```"):
             break
     if not idea:
-        for line in text.splitlines():
+        for line in lines:
             stripped = line.strip()
-            if stripped and not stripped.startswith("```") and not stripped.upper().startswith("PAPER:"):
+            if stripped and not stripped.startswith("```") and stripped.upper() not in {"IDEA", "PAPER"}:
                 idea = stripped[:180]
                 break
     return idea[:180], paper_id, title[:120], (summary or idea)[:180]
