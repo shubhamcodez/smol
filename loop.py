@@ -6,12 +6,17 @@ import argparse
 import csv
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from checkpointing import checkpoint_paths
+from papers import normalize_arxiv_id
+from scores import record_our_run, seed_references
 
 
 ROOT = Path(__file__).resolve().parent
@@ -26,6 +31,7 @@ LEDGER_COLUMNS = [
     "mean_benchmark_acc",
     "parameter_count",
     "training_backend",
+    "paper_ids",
     "mutation",
     "candidate_json",
 ]
@@ -47,6 +53,7 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 def append_ledger(path: Path, metrics: dict[str, Any], status: str, mutation: str) -> None:
     exists = path.exists() and path.stat().st_size > 0
+    paper_ids = metrics.get("paper_ids") or []
     row = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "run_id": metrics["run_id"],
@@ -57,6 +64,7 @@ def append_ledger(path: Path, metrics: dict[str, Any], status: str, mutation: st
         "mean_benchmark_acc": f'{metrics["mean_benchmark_acc"]:.9f}',
         "parameter_count": metrics["parameter_count"],
         "training_backend": metrics["training_backend"],
+        "paper_ids": ",".join(paper_ids),
         "mutation": mutation,
         "candidate_json": canonical(metrics["candidate"]),
     }
@@ -73,6 +81,7 @@ def append_crash(
     mutation: str,
     candidate: dict[str, Any],
     error: Exception,
+    paper_ids: list[str],
 ) -> None:
     exists = path.exists() and path.stat().st_size > 0
     row = {
@@ -85,6 +94,7 @@ def append_crash(
         "mean_benchmark_acc": "",
         "parameter_count": "",
         "training_backend": "",
+        "paper_ids": ",".join(paper_ids),
         "mutation": f"{mutation}; {type(error).__name__}: {str(error)[:300]}",
         "candidate_json": canonical(candidate),
     }
@@ -93,6 +103,15 @@ def append_crash(
         if not exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+def promote_checkpoint(run_dir: Path, best_root: Path) -> None:
+    paths = checkpoint_paths(best_root)
+    paths["dir"].mkdir(parents=True, exist_ok=True)
+    for name in ("model.pt", "candidate.json", "metrics.json", "meta.json"):
+        source = run_dir / name
+        if source.exists():
+            shutil.copy2(source, paths["dir"] / name)
 
 
 def evaluate(
@@ -104,6 +123,8 @@ def evaluate(
     training_backend: str,
     benchmark_limit: int,
     bpb_batches: int,
+    init_checkpoint: Path | None,
+    paper_ids: list[str],
 ) -> dict[str, Any]:
     write_json(candidate_path, candidate)
     command = [
@@ -123,7 +144,11 @@ def evaluate(
         str(benchmark_limit),
         "--bpb-batches",
         str(bpb_batches),
+        "--paper-ids",
+        ",".join(paper_ids),
     ]
+    if init_checkpoint is not None:
+        command.extend(["--init-checkpoint", str(init_checkpoint)])
     completed = subprocess.run(
         command,
         cwd=ROOT,
@@ -154,7 +179,6 @@ def propose(best: dict[str, Any], index: int) -> tuple[dict[str, Any], str]:
         choices = [128, 256, 384, 512, 768]
         old = int(proposal["n_embd"])
         proposal["n_embd"] = choices[min(choices.index(old) + 1, len(choices) - 1)]
-        # Keep head geometry valid for the new width.
         if proposal["n_embd"] % int(proposal["n_head"]) != 0:
             proposal["n_head"] = 8 if proposal["n_embd"] % 8 == 0 else 4
         proposal["intermediate_size"] = int(proposal["n_embd"] * 3)
@@ -191,6 +215,14 @@ def main() -> None:
     parser.add_argument("--best", type=Path, default=ROOT / "best.json")
     parser.add_argument("--ledger", type=Path, default=ROOT / "results.tsv")
     parser.add_argument("--artifacts", type=Path, default=ROOT / "artifacts")
+    parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "best")
+    parser.add_argument("--resume-checkpoint", type=Path, default=None,
+                        help="Warm-start from this checkpoint dir (default: checkpoints/best if present with --resume)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from --checkpoint-dir (candidate + weights)")
+    parser.add_argument("--paper-id", action="append", default=[],
+                        help="arXiv id informing this session; repeatable")
+    parser.add_argument("--scores", type=Path, default=ROOT / "scores.tsv")
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--budget-seconds", type=float, default=30.0)
     parser.add_argument("--training-backend", choices=["auto", "cpu", "cuda"], default="auto")
@@ -204,6 +236,10 @@ def main() -> None:
     if args.budget_seconds <= 0:
         raise ValueError("budget-seconds must be positive")
     args.artifacts.mkdir(parents=True, exist_ok=True)
+
+    paper_ids = [normalize_arxiv_id(value) for value in args.paper_id]
+    seed_references(args.scores)
+
     if args.reset:
         archive_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         if args.ledger.exists() and args.ledger.stat().st_size > 0:
@@ -213,8 +249,22 @@ def main() -> None:
             archive = args.best.with_name(f"{args.best.stem}.{archive_stamp}{args.best.suffix}")
             args.best.replace(archive)
 
-    source = args.best if args.best.exists() else args.candidate
-    best = json.loads(source.read_text(encoding="utf-8"))
+    init_checkpoint: Path | None = None
+    if args.resume or args.resume_checkpoint is not None:
+        init_checkpoint = args.resume_checkpoint or args.checkpoint_dir
+        ckpt_candidate = init_checkpoint / "candidate.json"
+        if not (init_checkpoint / "model.pt").exists():
+            raise SystemExit(f"cannot resume; missing {init_checkpoint / 'model.pt'}")
+        if ckpt_candidate.exists():
+            best = json.loads(ckpt_candidate.read_text(encoding="utf-8"))
+            write_json(args.best, best)
+            print(f"Resuming candidate from {ckpt_candidate}", flush=True)
+        else:
+            best = json.loads((args.best if args.best.exists() else args.candidate).read_text(encoding="utf-8"))
+    else:
+        source = args.best if args.best.exists() else args.candidate
+        best = json.loads(source.read_text(encoding="utf-8"))
+
     session = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     baseline_id = f"{session}-baseline-{short_hash(best)}"
     print(f"Evaluating baseline {baseline_id}", flush=True)
@@ -227,13 +277,18 @@ def main() -> None:
         args.training_backend,
         args.benchmark_limit,
         args.bpb_batches,
+        init_checkpoint,
+        paper_ids,
     )
     append_ledger(args.ledger, best_metrics, "baseline", "none")
+    record_our_run(args.scores, best_metrics, "baseline")
     write_json(args.best, best)
+    promote_checkpoint(args.artifacts / baseline_id, args.checkpoint_dir)
     print(
         f"baseline score={best_metrics['score']:.6f} "
         f"bpb={best_metrics['bpb']:.6f} "
-        f"acc={best_metrics['mean_benchmark_acc']:.4f}",
+        f"acc={best_metrics['mean_benchmark_acc']:.4f} "
+        f"resumed={best_metrics.get('resumed_from_checkpoint')}",
         flush=True,
     )
 
@@ -243,6 +298,7 @@ def main() -> None:
         run_id = f"{session}-trial{index + 1:02d}-{short_hash(proposal)}"
         print(f"Evaluating {run_id}: {mutation}", flush=True)
         try:
+            # Warm-start from current best weights when architecture is unchanged.
             metrics = evaluate(
                 args.candidate,
                 proposal,
@@ -252,16 +308,19 @@ def main() -> None:
                 args.training_backend,
                 args.benchmark_limit,
                 args.bpb_batches,
+                args.checkpoint_dir,
+                paper_ids,
             )
         except Exception as error:
             write_json(args.candidate, best)
-            append_crash(args.ledger, run_id, mutation, proposal, error)
+            append_crash(args.ledger, run_id, mutation, proposal, error, paper_ids)
             print(f"discard {run_id}: evaluator error: {error}", flush=True)
             continue
 
         improved = metrics["score"] < best_metrics["score"] - MIN_IMPROVEMENT
         status = "keep" if improved else "discard"
         append_ledger(args.ledger, metrics, status, mutation)
+        record_our_run(args.scores, metrics, status)
         print(
             f"{status} score={metrics['score']:.6f} "
             f"bpb={metrics['bpb']:.6f} "
@@ -273,6 +332,25 @@ def main() -> None:
             best_metrics = metrics
             accepted += 1
             write_json(args.best, best)
+            promote_checkpoint(args.artifacts / run_id, args.checkpoint_dir)
+            if paper_ids:
+                for paper_id in paper_ids:
+                    subprocess.run(
+                        [
+                            sys.executable,
+                            str(ROOT / "papers.py"),
+                            "mark",
+                            paper_id,
+                            "--status",
+                            "applied",
+                            "--run-id",
+                            run_id,
+                            "--idea",
+                            mutation,
+                        ],
+                        cwd=ROOT,
+                        check=False,
+                    )
         write_json(args.candidate, best)
 
     summary = {
@@ -283,6 +361,8 @@ def main() -> None:
         "best_mean_benchmark_acc": best_metrics["mean_benchmark_acc"],
         "best_validation_loss": best_metrics["validation_loss"],
         "best_candidate": best,
+        "paper_ids": paper_ids,
+        "checkpoint": str(args.checkpoint_dir.resolve()),
         "ledger": str(args.ledger.resolve()),
     }
     summary_path = args.artifacts / f"{session}-summary.json"

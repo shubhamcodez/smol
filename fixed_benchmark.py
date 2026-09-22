@@ -98,13 +98,33 @@ def train_for_budget(
     train_shard: TokenShard,
     budget_seconds: float,
     device: torch.device,
-) -> tuple[TransformerLM, int, float]:
+    init_checkpoint: Path | None = None,
+) -> tuple[TransformerLM, int, float, bool]:
     torch.manual_seed(int(candidate["seed"]))
     if device.type == "cuda":
         torch.cuda.manual_seed_all(int(candidate["seed"]))
 
     config = build_config(candidate)
     model = TransformerLM(config).to(device)
+    resumed = False
+    if init_checkpoint is not None:
+        from checkpointing import load_checkpoint_bundle
+
+        bundle = load_checkpoint_bundle(init_checkpoint)
+        ckpt_candidate = bundle.get("candidate") or {}
+        compatible = all(
+            int(ckpt_candidate.get(key, -1)) == int(candidate[key])
+            for key in ("n_layer", "n_embd", "n_head", "n_kv_head", "intermediate_size", "max_seq_len")
+        )
+        if compatible:
+            model.load_state_dict(bundle["state_dict"])
+            resumed = True
+        else:
+            print(
+                "INIT_CHECKPOINT_SKIPPED incompatible architecture; training from scratch",
+                flush=True,
+            )
+
     model.gradient_checkpointing_enable()
     optimizer = model.configure_optimizer(
         weight_decay=float(candidate["weight_decay"]),
@@ -141,7 +161,7 @@ def train_for_budget(
             torch.cuda.synchronize()
     if device.type == "cuda":
         torch.cuda.synchronize()
-    return model, step, time.perf_counter() - start
+    return model, step, time.perf_counter() - start, resumed
 
 
 def main() -> None:
@@ -153,6 +173,8 @@ def main() -> None:
     parser.add_argument("--training-backend", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--benchmark-limit", type=int, default=32)
     parser.add_argument("--bpb-batches", type=int, default=8)
+    parser.add_argument("--init-checkpoint", type=Path, default=None)
+    parser.add_argument("--paper-ids", default="")
     args = parser.parse_args()
 
     candidate = json.loads(args.candidate.read_text(encoding="utf-8"))
@@ -164,8 +186,12 @@ def main() -> None:
     train_shard = TokenShard(shards.train)
     val_shard = TokenShard(shards.val)
 
-    model, steps, train_seconds = train_for_budget(
-        candidate, train_shard, args.budget_seconds, device
+    model, steps, train_seconds, resumed = train_for_budget(
+        candidate,
+        train_shard,
+        args.budget_seconds,
+        device,
+        init_checkpoint=args.init_checkpoint,
     )
 
     seq_len = int(candidate["max_seq_len"])
@@ -187,6 +213,7 @@ def main() -> None:
         parameter_count,
     )
 
+    paper_ids = [part.strip() for part in args.paper_ids.split(",") if part.strip()]
     run_dir = args.artifacts / args.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics = {
@@ -202,10 +229,17 @@ def main() -> None:
         "training_backend": training_backend,
         "training_seconds": train_seconds,
         "training_steps": steps,
+        "resumed_from_checkpoint": resumed,
+        "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint else None,
+        "paper_ids": paper_ids,
         "candidate": candidate,
         "runtime_inventory": detect_runtime().to_dict(),
         "score_formula": "bpb + 2.0 * (1 - mean_benchmark_acc) + 1e-9 * params",
     }
+    from checkpointing import save_best_checkpoint
+
+    # Per-run checkpoint (promoted to checkpoints/best by the loop on keep).
+    save_best_checkpoint(model, candidate, metrics, root=run_dir, paper_ids=paper_ids)
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     print("AUTORESEARCH_METRICS " + json.dumps(metrics, separators=(",", ":")))
 

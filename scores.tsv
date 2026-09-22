@@ -1,0 +1,19 @@
+timestamp_utc	model_id	family	params_b	source	protocol	mmlu	arc_challenge	openbookqa	mean_acc	bpb	score	run_id	notes	citation
+2026-09-22T22:14:17.014202+00:00	Qwen2.5-0.5B	qwen2.5	0.5	reference	published	47.5	35.6		41.5500				published base; MMLU 5-shot, ARC-C 25-shot	https://qwenlm.github.io/blog/qwen2.5-llm/
+2026-09-22T22:14:17.014661+00:00	Qwen2.5-1.5B	qwen2.5	1.5	reference	published	60.9	54.7		57.8000				published base; MMLU 5-shot, ARC-C 25-shot	https://qwenlm.github.io/blog/qwen2.5-llm/
+2026-09-22T22:14:17.014907+00:00	Qwen2.5-3B	qwen2.5	3.0	reference	published	65.6	56.5		61.0500				published base; MMLU 5-shot, ARC-C 25-shot	https://qwenlm.github.io/blog/qwen2.5-llm/
+2026-09-22T22:14:17.015131+00:00	Qwen2.5-7B	qwen2.5	7.0	reference	published	74.2	63.7		68.9500				published base; MMLU 5-shot, ARC-C 25-shot	https://arxiv.org/abs/2412.15115
+2026-09-22T22:14:17.015827+00:00	Qwen2-0.5B	qwen2	0.5	reference	published	44.3	31.0		37.6500				published base	https://qwenlm.github.io/blog/qwen2.5-llm/
+2026-09-22T22:14:17.016027+00:00	Qwen2-1.5B	qwen2	1.5	reference	published	55.9	43.7		49.8000				published base	https://qwenlm.github.io/blog/qwen2.5-llm/
+2026-09-22T22:14:17.016192+00:00	Gemma2-2.6B	gemma2	2.6	reference	published	52.2	55.7		53.9500				as reported alongside Qwen2.5 small models	https://qwenlm.github.io/blog/qwen2.5-llm/
+2026-09-22T22:14:17.016335+00:00	Llama-3-8B	llama3	8.0	reference	published	66.6	59.3		62.9500				as reported in Qwen2.5 7B comparison table	https://arxiv.org/abs/2412.15115
+2026-09-22T22:14:17.016477+00:00	Mistral-7B	mistral	7.0	reference	published	64.2	60.0		62.1000				as reported in Qwen2.5 7B comparison table	https://arxiv.org/abs/2412.15115
+2026-09-22T22:14:17.016657+00:00	GPT-2-124M	gpt2	0.124	reference	published								classic LM; no standard MMLU/ARC suite in original paper	https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf
+2026-09-22T22:14:17.016825+00:00	chance-4way	baseline	0	reference	published	25.0	25.0	25.0	25.0000				uniform random among 4 choices	analytic
+2026-09-22T22:15:46.685063+00:00	smol-4L-256d-20260922T221509Z-baseline-45580f628c	smol	0.0159	ours	smol-truncated-ll	28.1250	18.7500	3.1250	16.6667	2.062377	3.744939	20260922T221509Z-baseline-45580f628c	baseline	local
+2026-09-22T22:16:23.861362+00:00	smol-4L-256d-20260922T221509Z-trial01-035ebe516b	smol	0.0159	ours	smol-truncated-ll	21.8750	15.6250	3.1250	13.5417	2.011086	3.756147	20260922T221509Z-trial01-035ebe516b	discard	local
+2026-09-22T22:17:01.054674+00:00	smol-4L-256d-20260922T221509Z-trial02-7e7871fd0e	smol	0.0159	ours	smol-truncated-ll	21.8750	15.6250	3.1250	13.5417	2.006880	3.751941	20260922T221509Z-trial02-7e7871fd0e	discard	local
+2026-09-22T22:17:38.604299+00:00	smol-4L-384d-20260922T221509Z-trial03-89275ca42c	smol	0.0261	ours	smol-truncated-ll	21.8750	12.5000	3.1250	12.5000	2.062526	3.838629	20260922T221509Z-trial03-89275ca42c	discard	local
+2026-09-22T22:18:17.003719+00:00	smol-6L-256d-20260922T221509Z-trial04-5803757f8b	smol	0.0174	ours	smol-truncated-ll	28.1250	18.7500	3.1250	16.6667	2.095865	3.779935	20260922T221509Z-trial04-5803757f8b	discard	local
+2026-09-22T22:22:17.569801+00:00	smol-4L-256d-20260922T222209Z-baseline-45580f628c	smol	0.0159	ours	smol-truncated-ll	31.2500	9.3750	3.1250	14.5833	2.963148	4.687377	20260922T222209Z-baseline-45580f628c	baseline	local
+2026-09-22T22:22:26.195747+00:00	smol-4L-256d-20260922T222209Z-trial01-035ebe516b	smol	0.0159	ours	smol-truncated-ll	21.8750	9.3750	3.1250	11.4583	2.530638	4.317367	20260922T222209Z-trial01-035ebe516b	keep	local

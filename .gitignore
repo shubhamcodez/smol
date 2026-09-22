@@ -12,8 +12,10 @@ build/
 .idea/
 .vscode/
 artifacts/
+checkpoints/
 results.tsv
 results.*.tsv
+papers.tsv
 best.*.json
 *.onnx
 data/

@@ -5,7 +5,7 @@
   "n_kv_head": 2,
   "intermediate_size": 768,
   "max_seq_len": 256,
-  "learning_rate": 0.0003,
+  "learning_rate": 0.000336,
   "weight_decay": 0.1,
   "batch_size": 2,
   "beta1": 0.9,

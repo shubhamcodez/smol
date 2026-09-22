@@ -64,6 +64,29 @@ score = bpb + 2.0 * (1 - mean_benchmark_acc) + 1e-9 * parameter_count
 Lower is better. `bpb` is held-out FineWeb bits-per-byte; `mean_benchmark_acc`
 averages truncated MMLU, ARC-Challenge, and OpenBookQA (log-likelihood MCQ).
 
+### Literature + checkpoints
+
+Ideas come from top-venue papers. Log every referral in `papers.tsv` so the same
+paper is not re-read or re-tried blindly. Accepted weights land in
+`checkpoints/best/` for later resume.
+
+```powershell
+python .\papers.py next --venue iclr --query "pretraining data filtering"
+python .\papers.py search "neurips fineweb" --log-new
+python .\papers.py fetch 2406.17557 --markdown
+python .\papers.py log 2406.17557 --venue neurips --status read --idea "edu quality filter"
+python .\loop.py --resume --paper-id 2406.17557 --iterations 4 --budget-seconds 30 --training-backend cuda
+python .\papers.py list
+python .\scores.py seed
+python .\scores.py compare
+```
+
+`scores.tsv` stores our BPB/score/truncated-bench numbers alongside published
+reference figures (Qwen2.5, Llama-3, Mistral, …). Protocols differ — compare
+within `protocol`, not across.
+
+See `program.md` for the full operating contract.
+
 ### Setup and run
 
 ```powershell
@@ -76,7 +99,7 @@ python .\audit.py
 ```
 
 `prepare_data.py` writes `data/shards/train.bin` and `val.bin`. Benchmarks live
-under `benchmarks/`. See `program.md` for the operating contract.
+under `benchmarks/`.
 
 For full-length training, use FP16 automatic mixed precision, micro-batch size
 1, gradient accumulation, and both checkpointing mechanisms:
