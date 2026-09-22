@@ -1,4 +1,5 @@
 numpy>=2.0
+matplotlib>=3.8
 torch>=2.5
 tiktoken>=0.7
 pyarrow>=15

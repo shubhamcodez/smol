@@ -27,7 +27,7 @@ from token_dataset import TokenShard, default_shard_paths
 
 
 ROOT = Path(__file__).resolve().parent
-ALLOWED_N_LAYER = {2, 4, 6, 8, 12}
+ALLOWED_N_LAYER = {2, 4, 6, 8, 12, 24}
 ALLOWED_N_EMBD = {128, 256, 384, 512, 768}
 ALLOWED_BATCH = {1, 2, 4, 8}
 ALLOWED_SEQ = {128, 256, 512, 1024}
@@ -139,7 +139,7 @@ def train_for_budget(
         * int(candidate["n_embd"])
         * int(candidate["n_layer"])
     )
-    if activations > 50_000_000:
+    if model.get_num_params() > 80_000_000 or activations > 50_000_000:
         model.gradient_checkpointing_enable()
     optimizer = model.configure_optimizer(
         weight_decay=float(candidate["weight_decay"]),

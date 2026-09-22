@@ -211,6 +211,79 @@ def architecture_imports() -> None:
         raise RuntimeError(detail)
 
 
+def write_progress_plot(ledger: Path, output: Path) -> None:
+    """Save the kept / discarded / running-best chart. No window is opened."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not ledger.exists():
+        return
+    with ledger.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    points: list[tuple[str, float, str]] = []
+    for row in rows:
+        try:
+            bpb = float(row["bpb"])
+        except (TypeError, ValueError):
+            continue
+        points.append((row.get("status") or "", bpb, row.get("mutation") or ""))
+    if not points:
+        return
+
+    kept_x: list[int] = []
+    kept_y: list[float] = []
+    kept_labels: list[str] = []
+    discard_x: list[int] = []
+    discard_y: list[float] = []
+    running: list[float] = []
+    best: float | None = None
+    for index, (status, bpb, mutation) in enumerate(points):
+        if status in {"baseline", "keep"}:
+            label = "baseline" if status == "baseline" else mutation.split("||", 1)[0].strip()
+            kept_x.append(index)
+            kept_y.append(bpb)
+            kept_labels.append((label or status)[:48])
+            if best is None or bpb < best:
+                best = bpb
+        else:
+            discard_x.append(index)
+            discard_y.append(bpb)
+        if best is None:
+            best = bpb
+        running.append(best)
+
+    kept_improvements = sum(1 for status, _, _ in points if status == "keep")
+    figure, axis = plt.subplots(figsize=(12, 6))
+    axis.plot(range(len(points)), running, color="#3cb043", linewidth=2, label="Running best", zorder=2)
+    axis.scatter(discard_x, discard_y, c="#b0b0b0", s=18, label="Discarded", zorder=3)
+    axis.scatter(kept_x, kept_y, c="#3cb043", s=42, label="Kept", zorder=4)
+    for x_pos, y_pos, label in zip(kept_x, kept_y, kept_labels):
+        axis.annotate(
+            label,
+            (x_pos, y_pos),
+            textcoords="offset points",
+            xytext=(4, 6),
+            rotation=35,
+            fontsize=8,
+            color="#2e8b34",
+            ha="left",
+            va="bottom",
+        )
+    axis.set_title(
+        f"Autoresearch Progress: {len(points)} Experiments, {kept_improvements} Kept Improvements"
+    )
+    axis.set_xlabel("Experiment #")
+    axis.set_ylabel("Validation BPB (lower is better)")
+    axis.grid(True, color="#dddddd")
+    axis.legend(frameon=False, loc="upper right")
+    figure.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=150)
+    plt.close(figure)
+
+
 def tail_text(path: Path, limit: int = 15) -> str:
     if not path.exists():
         return ""
@@ -459,6 +532,13 @@ def main() -> None:
     summary_path = args.artifacts / f"{session}-summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print("AUTORESEARCH_SUMMARY " + json.dumps(summary, separators=(",", ":")))
+    plot_path = ROOT / "progress.png"
+    try:
+        write_progress_plot(args.ledger, plot_path)
+    except Exception as error:
+        print(f"progress plot skipped: {error}", flush=True)
+    else:
+        print(f"Wrote {plot_path}", flush=True)
 
 
 if __name__ == "__main__":
