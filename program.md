@@ -6,9 +6,10 @@ The objective is to lower the fixed `score` reported by `fixed_benchmark.py`.
 score = bpb + 2.0 * (1 - mean_benchmark_acc) + 1e-9 * parameter_count
 ```
 
-`bpb` is held-out FineWeb bits-per-byte. `mean_benchmark_acc` averages truncated
-MMLU, ARC-Challenge, and OpenBookQA multiple-choice accuracy scored by
-log-likelihood. Lower is better.
+`bpb` is held-out FineWeb bits-per-byte. `mean_benchmark_acc` averages a random
+64 questions from each of MMLU, ARC-Challenge, and OpenBookQA, scored by
+log-likelihood. One loop run shares that draw across the baseline and trials.
+Lower is better.
 
 ## Literature-driven methodology
 
@@ -45,9 +46,10 @@ or schedule mutations warm-start from `checkpoints/best`.
 
 ## Files and boundaries
 
-- `model.py` is the architecture surface. The Grok proposer rewrites it, one
-  idea per trial, then the loop keeps or restores the file.
-- `candidate.json` is the size and optimizer surface used by `--proposer grid`.
+- `model.py` is the research surface. Each trial rewrites it from one searched
+  paper, then the loop keeps or restores the file.
+- `candidate.json` holds the training setup the evaluator applies (width, depth,
+  learning rate, batch). It is not a search grid.
 - `fixed_benchmark.py`, `pretrain_eval.py`, shard preparation, scoring formula,
   time budget, and benchmark truncation stay fixed during an experiment.
 - `data/shards/{train,val}.bin` are the immutable tokenized surfaces for a run.
@@ -60,10 +62,8 @@ or schedule mutations warm-start from `checkpoints/best`.
 
 1. Optionally resume from `checkpoints/best`.
 2. Run a baseline before changing anything.
-3. Make one intelligible mutation, cited to a logged paper when the change
-   comes from the literature. `--proposer grok` may rewrite `model.py`.
-   `--proposer grid` only walks the candidate hyperparameters.
+3. Search for one method and rewrite `model.py` from that paper.
 4. Train for the same wall-clock budget on FineWeb shards.
-5. Measure held-out BPB and truncated MMLU/ARC/OpenBookQA accuracy.
-6. Keep the mutation only when its score improves by at least 0.001.
+5. Measure held-out BPB and one random 64-question sample of MMLU, ARC-Challenge, and OpenBookQA. That sample is shared by the baseline and every trial in the session.
+6. Keep the mutation only when its score improves by at least 0.01.
 7. Log every completed experiment and update paper status when applicable.

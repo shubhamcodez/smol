@@ -62,14 +62,12 @@ score = bpb + 2.0 * (1 - mean_benchmark_acc) + 1e-9 * parameter_count
 ```
 
 Lower is better. `bpb` is held-out FineWeb bits-per-byte; `mean_benchmark_acc`
-averages truncated MMLU, ARC-Challenge, and OpenBookQA (log-likelihood MCQ).
+averages one random 64 questions from each of MMLU, ARC-Challenge, and OpenBookQA, shared by every arm in that run (log-likelihood MCQ).
 
 ### Literature + checkpoints
 
-Ideas come from top-venue papers, including architecture and methods from
-models such as Kimi, Qwen, and Mistral. `--proposer grok` asks Grok for one
-change to `model.py`, trains it under the fixed score, and keeps or restores
-the file. `--proposer grid` only walks hyperparameters in `candidate.json`.
+Each trial searches for a method, then asks Grok to put that paper's idea into
+`model.py`. The fixed score decides whether the file is kept or restored.
 Log every referral in `papers.tsv` so the same paper is not re-tried blindly.
 Accepted weights land in `checkpoints/best/` for later resume.
 
@@ -78,8 +76,7 @@ python .\papers.py next --venue iclr --query "pretraining data filtering"
 python .\papers.py search "neurips fineweb" --log-new
 python .\papers.py fetch 2406.17557 --markdown
 python .\papers.py log 2406.17557 --venue neurips --status read --idea "edu quality filter"
-python .\loop.py --proposer grok --iterations 4 --budget-seconds 30 --training-backend cuda
-python .\loop.py --proposer grid --resume --iterations 4 --budget-seconds 30 --training-backend cuda
+python .\loop.py --iterations 4 --budget-seconds 30 --training-backend cuda
 python .\papers.py list
 python .\scores.py seed
 python .\scores.py compare

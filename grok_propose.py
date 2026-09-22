@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -86,9 +89,15 @@ def _message_text(message: dict) -> str:
     return "\n".join(parts)
 
 
-def chat(api_key: str, model: str, messages: list[dict[str, str]], timeout: float = 300.0) -> str:
+def chat(
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    timeout: float = 300.0,
+    max_tokens: int = 16000,
+) -> str:
     payload = json.dumps(
-        {"model": model, "temperature": 0.3, "max_tokens": 16000, "messages": messages}
+        {"model": model, "temperature": 0.3, "max_tokens": max_tokens, "messages": messages}
     ).encode("utf-8")
     request = urllib.request.Request(
         XAI_URL,
@@ -99,12 +108,25 @@ def chat(api_key: str, model: str, messages: list[dict[str, str]], timeout: floa
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")[:800]
-        raise RuntimeError(f"xAI HTTP {error.code}: {detail}") from error
+    data = None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")[:800]
+            if error.code not in {408, 429, 500, 502, 503, 504} or attempt == 2:
+                raise RuntimeError(f"xAI HTTP {error.code}: {detail}") from error
+            last_error = error
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            last_error = error
+            if attempt == 2:
+                raise RuntimeError(f"xAI request failed: {error}") from error
+        time.sleep(2.0 * (attempt + 1))
+    if data is None:
+        raise RuntimeError(f"xAI request failed: {last_error}")
     runs = ROOT / "runs"
     runs.mkdir(exist_ok=True)
     (runs / "last_api_response.json").write_text(json.dumps(data)[:2_000_000], encoding="utf-8")
@@ -126,6 +148,38 @@ def extract_model_source(text: str) -> str | None:
         if all(snippet in source for snippet in REQUIRED_SNIPPETS):
             return source
     return None
+
+
+def extract_diff(text: str) -> str | None:
+    fences = re.findall(r"```(?:diff|udiff|patch)?\s*\n(.*?)```", text, flags=re.S | re.I)
+    for block in fences:
+        if block.lstrip().startswith("---") or "\n---" in block:
+            return block.strip() + "\n"
+    return None
+
+
+def apply_unified_diff(original: str, diff: str) -> str:
+    work = ROOT / "runs" / "patch_work"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    target = work / "model.py"
+    target.write_text(original, encoding="utf-8", newline="\n")
+    last_error = ""
+    for strip in (1, 0):
+        target.write_text(original, encoding="utf-8", newline="\n")
+        completed = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", f"-p{strip}"],
+            input=diff,
+            cwd=work,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode == 0 and target.exists():
+            return target.read_text(encoding="utf-8")
+        last_error = (completed.stderr or completed.stdout)[-500:]
+    raise RuntimeError(last_error or "git apply failed")
 
 
 def _parse_preamble(text: str) -> tuple[str, str, str, str]:
@@ -199,6 +253,7 @@ def choose_method_query(
                 ),
             },
         ],
+        max_tokens=128,
     )
     match = re.search(r"QUERY:\s*(.+)", reply)
     query = (match.group(1) if match else reply).strip().splitlines()[0]
@@ -245,6 +300,18 @@ def find_method_paper(
     raise RuntimeError(f"no unseen paper for method search {last_query!r}")
 
 
+def _proposal_source(reply: str, model_src: str) -> str | None:
+    diff = extract_diff(reply)
+    if diff is not None:
+        try:
+            patched = apply_unified_diff(model_src, diff)
+        except RuntimeError:
+            patched = ""
+        if patched and all(snippet in patched for snippet in REQUIRED_SNIPPETS):
+            return patched if patched.endswith("\n") else patched + "\n"
+    return extract_model_source(reply)
+
+
 def propose_architecture(
     api_key: str,
     model_src: str,
@@ -267,9 +334,11 @@ def propose_architecture(
         "and CausalLMOutput, and the methods forward, configure_optimizer, get_num_params, "
         "and gradient_checkpointing_enable. Vocab size stays 50304. The model must train "
         "with micro-batches on a 6GB GPU. One change only. "
-        "Reply with one header line and then the complete file:\n"
+        "Keep every existing parameter name and shape so the current checkpoint still loads. "
+        "Change the computation, not tensor sizes. "
+        "Reply with one header line and a unified diff. Do not return the whole file.\n"
         "IDEA: one sentence of what this trial changes\n"
-        "```python\n<full model.py>\n```"
+        "```diff\n--- a/model.py\n+++ b/model.py\n<unified diff>\n```"
     )
     abstract = (paper.get("summary") or "")[:1200]
     user = (
@@ -289,11 +358,12 @@ def propose_architecture(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
+        max_tokens=4000,
     )
     runs = ROOT / "runs"
     runs.mkdir(exist_ok=True)
     (runs / "last_proposal.md").write_text(reply, encoding="utf-8")
-    source = extract_model_source(reply)
+    source = _proposal_source(reply, model_src)
     if source is None:
         reply = chat(
             api_key,
@@ -315,7 +385,7 @@ def propose_architecture(
             ],
         )
         (runs / "last_proposal.md").write_text(reply, encoding="utf-8")
-        source = extract_model_source(reply)
+        source = _proposal_source(reply, model_src)
     if source is None:
         raise RuntimeError("Grok did not return a usable model.py")
     validate_source(source)
