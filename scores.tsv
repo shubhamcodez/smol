@@ -89,3 +89,4 @@ timestamp_utc	model_id	family	params_b	source	protocol	mmlu	arc_challenge	openbo
 2026-09-22T23:19:11.144814+00:00	smol-4L-256d-20260922T231835Z-baseline-e59add6aeb	smol	0.0159	ours	smol-truncated-ll	31.2500	17.1875	23.4375	23.9583	1.953168	3.489897	20260922T231835Z-baseline-e59add6aeb	baseline	local
 2026-09-22T23:20:04.319721+00:00	smol-4L-256d-20260922T231835Z-trial01-e59add6aeb	smol	0.0159	ours	smol-truncated-ll	29.6875	20.3125	23.4375	24.4792	1.956107	3.482419	20260922T231835Z-trial01-e59add6aeb	discard	local
 2026-09-22T23:22:15.256066+00:00	smol-4L-256d-20260922T231835Z-trial02-e59add6aeb	smol	0.0159	ours	smol-truncated-ll	28.1250	18.7500	21.8750	22.9167	1.953396	3.510957	20260922T231835Z-trial02-e59add6aeb	discard	local
+2026-09-22T23:24:13.643468+00:00	smol-4L-256d-20260922T231835Z-trial03-e59add6aeb	smol	0.0159	ours	smol-truncated-ll	31.2500	15.6250	26.5625	24.4792	1.954755	3.481067	20260922T231835Z-trial03-e59add6aeb	discard	local
