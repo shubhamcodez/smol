@@ -19,8 +19,12 @@ ICML, …), not from unlogged intuition.
 2. If the arXiv id is already in `papers.tsv`, do **not** re-read or re-try it
    unless status is being explicitly revisited with new notes.
 3. Log every referred paper before using it (`papers.py log` / `search --log-new`).
-4. Extract one intelligible mutation (optimizer, architecture knob, schedule, …).
-5. Run the loop from the current best checkpoint when continuing a line of work.
+4. Extract one intelligible mutation. That can be a hyperparameter, or a real
+   architecture or method change in `model.py` (attention, feed-forward, norms,
+   positions, initialization) drawn from a logged paper — Kimi, Qwen, Mistral,
+   and the rest of the literature are in scope.
+5. Run the loop from the current best checkpoint when the weights still match.
+   Architecture edits train from scratch for that trial.
 6. Mark the paper `applied`, `skipped`, or `rejected` with the run id and idea.
 
 `papers.tsv` is append-only. Latest row per `arxiv_id` is the current status.
@@ -41,11 +45,13 @@ or schedule mutations warm-start from `checkpoints/best`.
 
 ## Files and boundaries
 
-- `candidate.json` is the only automatically mutable training surface.
+- `model.py` is the architecture surface. The Grok proposer rewrites it, one
+  idea per trial, then the loop keeps or restores the file.
+- `candidate.json` is the size and optimizer surface used by `--proposer grid`.
 - `fixed_benchmark.py`, `pretrain_eval.py`, shard preparation, scoring formula,
-  time budget, and benchmark truncation are fixed during an experiment.
+  time budget, and benchmark truncation stay fixed during an experiment.
 - `data/shards/{train,val}.bin` are the immutable tokenized surfaces for a run.
-- `results.tsv` is the experiment ledger. Never silently delete or rewrite it.
+- `results.tsv` is the experiment ledger. Append to it; `--reset` is the only way to clear it.
 - `papers.tsv` is the literature ledger. Never silently delete or rewrite it.
 - `scores.tsv` is the model scoreboard (our runs + published references).
 - `best.json` / `checkpoints/best/` are the last accepted candidate and weights.
@@ -54,7 +60,9 @@ or schedule mutations warm-start from `checkpoints/best`.
 
 1. Optionally resume from `checkpoints/best`.
 2. Run a baseline before changing anything.
-3. Make one small, intelligible mutation (preferably cited to a logged paper).
+3. Make one intelligible mutation, cited to a logged paper when the change
+   comes from the literature. `--proposer grok` may rewrite `model.py`.
+   `--proposer grid` only walks the candidate hyperparameters.
 4. Train for the same wall-clock budget on FineWeb shards.
 5. Measure held-out BPB and truncated MMLU/ARC/OpenBookQA accuracy.
 6. Keep the mutation only when its score improves by at least 0.001.

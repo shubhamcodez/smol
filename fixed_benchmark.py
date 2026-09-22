@@ -117,8 +117,14 @@ def train_for_budget(
             for key in ("n_layer", "n_embd", "n_head", "n_kv_head", "intermediate_size", "max_seq_len")
         )
         if compatible:
-            model.load_state_dict(bundle["state_dict"])
-            resumed = True
+            try:
+                model.load_state_dict(bundle["state_dict"])
+                resumed = True
+            except RuntimeError as error:
+                print(
+                    f"INIT_CHECKPOINT_SKIPPED weight mismatch ({error}); training from scratch",
+                    flush=True,
+                )
         else:
             print(
                 "INIT_CHECKPOINT_SKIPPED incompatible architecture; training from scratch",

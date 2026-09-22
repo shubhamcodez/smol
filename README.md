@@ -66,16 +66,20 @@ averages truncated MMLU, ARC-Challenge, and OpenBookQA (log-likelihood MCQ).
 
 ### Literature + checkpoints
 
-Ideas come from top-venue papers. Log every referral in `papers.tsv` so the same
-paper is not re-read or re-tried blindly. Accepted weights land in
-`checkpoints/best/` for later resume.
+Ideas come from top-venue papers, including architecture and methods from
+models such as Kimi, Qwen, and Mistral. `--proposer grok` asks Grok for one
+change to `model.py`, trains it under the fixed score, and keeps or restores
+the file. `--proposer grid` only walks hyperparameters in `candidate.json`.
+Log every referral in `papers.tsv` so the same paper is not re-tried blindly.
+Accepted weights land in `checkpoints/best/` for later resume.
 
 ```powershell
 python .\papers.py next --venue iclr --query "pretraining data filtering"
 python .\papers.py search "neurips fineweb" --log-new
 python .\papers.py fetch 2406.17557 --markdown
 python .\papers.py log 2406.17557 --venue neurips --status read --idea "edu quality filter"
-python .\loop.py --resume --paper-id 2406.17557 --iterations 4 --budget-seconds 30 --training-backend cuda
+python .\loop.py --proposer grok --iterations 4 --budget-seconds 30 --training-backend cuda
+python .\loop.py --proposer grid --resume --paper-id 2406.17557 --iterations 4 --budget-seconds 30 --training-backend cuda
 python .\papers.py list
 python .\scores.py seed
 python .\scores.py compare

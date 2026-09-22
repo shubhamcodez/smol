@@ -20,6 +20,9 @@ from scores import record_our_run, seed_references
 
 
 ROOT = Path(__file__).resolve().parent
+MODEL_PATH = ROOT / "model.py"
+MODEL_KEEP = ROOT / "checkpoints" / "model_keep.py"
+MODEL_BASELINE = ROOT / "checkpoints" / "model_baseline.py"
 MIN_IMPROVEMENT = 1e-3
 LEDGER_COLUMNS = [
     "timestamp_utc",
@@ -209,6 +212,73 @@ def propose(best: dict[str, Any], index: int) -> tuple[dict[str, Any], str]:
     return proposal, description
 
 
+def snapshot_architecture(resume: bool) -> None:
+    MODEL_KEEP.parent.mkdir(parents=True, exist_ok=True)
+    if resume and MODEL_KEEP.exists():
+        shutil.copy2(MODEL_KEEP, MODEL_PATH)
+        print(f"Resuming architecture from {MODEL_KEEP}", flush=True)
+    else:
+        shutil.copy2(MODEL_PATH, MODEL_KEEP)
+    if not MODEL_BASELINE.exists():
+        shutil.copy2(MODEL_PATH, MODEL_BASELINE)
+
+
+def restore_architecture() -> None:
+    if MODEL_KEEP.exists():
+        shutil.copy2(MODEL_KEEP, MODEL_PATH)
+
+
+def accept_architecture() -> None:
+    MODEL_KEEP.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(MODEL_PATH, MODEL_KEEP)
+
+
+def architecture_imports() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from model import ModelConfig, TransformerLM; "
+            "TransformerLM(ModelConfig(n_layer=2, n_embd=128, n_head=4, n_kv_head=2, "
+            "intermediate_size=256, max_seq_len=128))",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout)[-1500:]
+        raise RuntimeError(detail)
+
+
+def tail_text(path: Path, limit: int = 15) -> str:
+    if not path.exists():
+        return ""
+    return "\n".join(path.read_text(encoding="utf-8").splitlines()[-limit:])
+
+
+def remember_paper(paper_id: str, title: str, idea: str) -> None:
+    if not paper_id or paper_id in known_ids(ROOT / "papers.tsv"):
+        return
+    append_row(
+        ROOT / "papers.tsv",
+        {
+            "timestamp_utc": utc_now(),
+            "arxiv_id": paper_id,
+            "title": title,
+            "venue": "",
+            "year": "",
+            "status": "read",
+            "idea": idea,
+            "run_id": "",
+            "notes": "proposed by grok",
+            "url": f"https://huggingface.co/papers/{paper_id}",
+        },
+    )
+
+
 def paper_attempt_line(paper_ids: list[str]) -> str:
     summaries = attempt_summaries(paper_ids)
     if not summaries:
@@ -229,13 +299,17 @@ def main() -> None:
                         help="Resume from --checkpoint-dir (candidate + weights)")
     parser.add_argument("--paper-id", action="append", default=[],
                         help="arXiv id informing this session; repeatable")
+    parser.add_argument("--proposer", choices=["grok", "grid"], default="grok",
+                        help="grok rewrites model.py from a paper; grid walks hyperparameters")
+    parser.add_argument("--grok-model", default=DEFAULT_MODEL)
     parser.add_argument("--scores", type=Path, default=ROOT / "scores.tsv")
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--budget-seconds", type=float, default=30.0)
     parser.add_argument("--training-backend", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--benchmark-limit", type=int, default=32)
     parser.add_argument("--bpb-batches", type=int, default=8)
-    parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--reset", action="store_true",
+                        help="Delete best.json and results.tsv before starting")
     args = parser.parse_args()
 
     if args.iterations < 0:
@@ -246,15 +320,23 @@ def main() -> None:
 
     paper_ids = [normalize_arxiv_id(value) for value in args.paper_id]
     seed_references(args.scores)
+    api_key = ""
+    if args.proposer == "grok":
+        api_key = load_api_key()
+        if not api_key:
+            raise SystemExit("proposer grok needs XAI_API_KEY in .env")
+        snapshot_architecture(args.resume)
+        print(
+            "proposer=grok; each trial rewrites model.py from one paper idea "
+            "(Kimi, Qwen, Mistral, and the rest). Use --proposer grid for hyperparameters only.",
+            flush=True,
+        )
 
     if args.reset:
-        archive_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        if args.ledger.exists() and args.ledger.stat().st_size > 0:
-            archive = args.ledger.with_name(f"{args.ledger.stem}.{archive_stamp}{args.ledger.suffix}")
-            args.ledger.replace(archive)
+        if args.ledger.exists():
+            args.ledger.unlink()
         if args.best.exists():
-            archive = args.best.with_name(f"{args.best.stem}.{archive_stamp}{args.best.suffix}")
-            args.best.replace(archive)
+            args.best.unlink()
 
     init_checkpoint: Path | None = None
     if args.resume or args.resume_checkpoint is not None:
