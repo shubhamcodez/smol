@@ -275,6 +275,32 @@ def latest_status_by_id(path: Path) -> dict[str, dict[str, str]]:
     return latest
 
 
+def _one_line(text: str, limit: int = 140) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def attempt_summaries(paper_ids: list[str], path: Path = DEFAULT_LOG) -> list[str]:
+    """One line per paper: id, short title, venue, and the idea being tried."""
+    latest = latest_status_by_id(path)
+    lines: list[str] = []
+    for raw_id in paper_ids:
+        paper_id = normalize_arxiv_id(raw_id)
+        row = latest.get(paper_id)
+        if row is None:
+            lines.append(f"{paper_id}: not in papers.tsv")
+            continue
+        title = _one_line(row.get("title", ""), 72)
+        title = title.split(":")[0].strip() or title
+        idea = _one_line(row.get("idea", "") or "idea not logged")
+        where = ", ".join(part for part in (row.get("venue", ""), row.get("year", "")) if part)
+        where_bit = f" ({where})" if where else ""
+        lines.append(f"{paper_id}{where_bit} {title}: {idea}")
+    return lines
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Conference paper research ledger")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from checkpointing import checkpoint_paths
-from papers import normalize_arxiv_id
+from papers import attempt_summaries, normalize_arxiv_id
 from scores import record_our_run, seed_references
 
 
@@ -209,6 +209,13 @@ def propose(best: dict[str, Any], index: int) -> tuple[dict[str, Any], str]:
     return proposal, description
 
 
+def paper_attempt_line(paper_ids: list[str]) -> str:
+    summaries = attempt_summaries(paper_ids)
+    if not summaries:
+        return ""
+    return " | ".join(summaries)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidate", type=Path, default=ROOT / "candidate.json")
@@ -296,7 +303,11 @@ def main() -> None:
     for index in range(args.iterations):
         proposal, mutation = propose(best, index)
         run_id = f"{session}-trial{index + 1:02d}-{short_hash(proposal)}"
+        paper_line = paper_attempt_line(paper_ids)
         print(f"Evaluating {run_id}: {mutation}", flush=True)
+        if paper_line:
+            print(f"  paper {paper_line}", flush=True)
+            mutation = f"{mutation} || {paper_line}"
         try:
             # Warm-start from current best weights when architecture is unchanged.
             metrics = evaluate(
@@ -345,8 +356,6 @@ def main() -> None:
                             "applied",
                             "--run-id",
                             run_id,
-                            "--idea",
-                            mutation,
                         ],
                         cwd=ROOT,
                         check=False,
