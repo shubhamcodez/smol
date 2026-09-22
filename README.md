@@ -45,26 +45,38 @@ residual stream, and SwiGLU provides the gated feed-forward path.
 The research harness follows a constrained experimental design rather than
 allowing an agent to change everything at once:
 
-- the evaluator, validation data, time budget, seeds, and score are immutable;
-- `candidate.json` is the small automatically mutable surface;
+- the evaluator, validation shards, time budget, seeds, and score are immutable;
+- `candidate.json` is the small automatically mutable surface (width, depth, LR, …);
 - every run starts with a baseline and changes one intelligible variable;
 - improved candidates are kept, regressions and crashes are recorded and
   discarded, and `results.tsv` remains the experiment ledger;
 - a minimum improvement threshold prevents ordinary timing noise from becoming
   a false discovery;
 - fixed wall-clock trials reward changes that improve quality as well as changes
-  that process more useful tokens in the same time;
-- accelerator identity is verified instead of treating successful CPU fallback
-  as a GPU or NPU result.
+  that process more useful tokens in the same time.
 
-The existing loop has already demonstrated these controls with a small proxy
-benchmark. Its CPU and QNN-NPU paths were verified locally; its CUDA path is
-implemented but awaits the RTX 3070 hardware run. It does **not** yet train this
-Transformer. The real language-model loop still needs the FineWeb-Edu
-preparation pipeline, memory-mapped token shards, a held-out bits-per-byte
-evaluator, checkpoint persistence, and the RTX 3070 run. Keeping that
-distinction explicit prevents proxy improvements from being presented as model
-improvements.
+### Pretrain score
+
+```
+score = bpb + 2.0 * (1 - mean_benchmark_acc) + 1e-9 * parameter_count
+```
+
+Lower is better. `bpb` is held-out FineWeb bits-per-byte; `mean_benchmark_acc`
+averages truncated MMLU, ARC-Challenge, and OpenBookQA (log-likelihood MCQ).
+
+### Setup and run
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r .\requirements.txt
+python .\prepare_data.py --train-tokens 50000000 --val-tokens 1000000
+python .\nvidia_smoke.py
+python .\loop.py --reset --iterations 4 --budget-seconds 30 --training-backend cuda
+python .\audit.py
+```
+
+`prepare_data.py` writes `data/shards/train.bin` and `val.bin`. Benchmarks live
+under `benchmarks/`. See `program.md` for the operating contract.
 
 For full-length training, use FP16 automatic mixed precision, micro-batch size
 1, gradient accumulation, and both checkpointing mechanisms:
@@ -98,8 +110,8 @@ and train faster without changing the model weights.
 On the NVIDIA computer, verify checkpointed training and cached inference with:
 
 ```powershell
-python .\autoresearch\nvidia_smoke.py
-python .\autoresearch\nvidia_smoke.py --full --sequence-length 4096
+python .\nvidia_smoke.py
+python .\nvidia_smoke.py --full --sequence-length 4096
 ```
 
 The first command is a quick CUDA-path check. The second performs one complete

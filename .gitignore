@@ -16,3 +16,5 @@ results.tsv
 results.*.tsv
 best.*.json
 *.onnx
+data/
+benchmarks/

@@ -1,2 +1,6 @@
 numpy>=2.0
 torch>=2.5
+tiktoken>=0.7
+pyarrow>=15
+tqdm>=4.66
+psutil>=5.9

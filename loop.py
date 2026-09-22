@@ -8,7 +8,6 @@ import hashlib
 import json
 import subprocess
 import sys
-import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,11 +21,11 @@ LEDGER_COLUMNS = [
     "run_id",
     "status",
     "score",
+    "bpb",
     "validation_loss",
-    "latency_ms",
+    "mean_benchmark_acc",
     "parameter_count",
     "training_backend",
-    "deployment_backend",
     "mutation",
     "candidate_json",
 ]
@@ -48,17 +47,16 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 def append_ledger(path: Path, metrics: dict[str, Any], status: str, mutation: str) -> None:
     exists = path.exists() and path.stat().st_size > 0
-    deployment = metrics["deployment"]
     row = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "run_id": metrics["run_id"],
         "status": status,
         "score": f'{metrics["score"]:.9f}',
+        "bpb": f'{metrics["bpb"]:.9f}',
         "validation_loss": f'{metrics["validation_loss"]:.9f}',
-        "latency_ms": f'{deployment["latency_ms"]:.6f}',
+        "mean_benchmark_acc": f'{metrics["mean_benchmark_acc"]:.9f}',
         "parameter_count": metrics["parameter_count"],
         "training_backend": metrics["training_backend"],
-        "deployment_backend": deployment["backend"],
         "mutation": mutation,
         "candidate_json": canonical(metrics["candidate"]),
     }
@@ -82,11 +80,11 @@ def append_crash(
         "run_id": run_id,
         "status": "crash",
         "score": "",
+        "bpb": "",
         "validation_loss": "",
-        "latency_ms": "",
+        "mean_benchmark_acc": "",
         "parameter_count": "",
         "training_backend": "",
-        "deployment_backend": "",
         "mutation": f"{mutation}; {type(error).__name__}: {str(error)[:300]}",
         "candidate_json": canonical(candidate),
     }
@@ -104,7 +102,8 @@ def evaluate(
     artifacts: Path,
     budget_seconds: float,
     training_backend: str,
-    deployment: str,
+    benchmark_limit: int,
+    bpb_batches: int,
 ) -> dict[str, Any]:
     write_json(candidate_path, candidate)
     command = [
@@ -120,15 +119,17 @@ def evaluate(
         str(budget_seconds),
         "--training-backend",
         training_backend,
-        "--deployment",
-        deployment,
+        "--benchmark-limit",
+        str(benchmark_limit),
+        "--bpb-batches",
+        str(bpb_batches),
     ]
     completed = subprocess.run(
         command,
         cwd=ROOT,
         text=True,
         capture_output=True,
-        timeout=max(180.0, budget_seconds + 150.0),
+        timeout=max(600.0, budget_seconds + 480.0),
         check=False,
     )
     for line in reversed(completed.stdout.splitlines()):
@@ -140,32 +141,46 @@ def evaluate(
 
 def propose(best: dict[str, Any], index: int) -> tuple[dict[str, Any], str]:
     proposal = deepcopy(best)
-    move = index % 6
+    move = index % 8
     if move == 0:
         old = float(proposal["learning_rate"])
-        proposal["learning_rate"] = min(0.05, round(old * 2.0, 8))
+        proposal["learning_rate"] = min(3e-3, round(old * 1.6, 8))
         description = f"learning_rate {old:g} -> {proposal['learning_rate']:g}"
     elif move == 1:
-        choices = [32, 48, 64, 96, 128, 160, 192, 256]
-        old = int(proposal["hidden_dim"])
-        proposal["hidden_dim"] = choices[min(choices.index(old) + 1, len(choices) - 1)]
-        description = f"hidden_dim {old} -> {proposal['hidden_dim']}"
-    elif move == 2:
         old = float(proposal["learning_rate"])
         proposal["learning_rate"] = max(1e-5, round(old * 0.7, 8))
         description = f"learning_rate {old:g} -> {proposal['learning_rate']:g}"
+    elif move == 2:
+        choices = [128, 256, 384, 512, 768]
+        old = int(proposal["n_embd"])
+        proposal["n_embd"] = choices[min(choices.index(old) + 1, len(choices) - 1)]
+        # Keep head geometry valid for the new width.
+        if proposal["n_embd"] % int(proposal["n_head"]) != 0:
+            proposal["n_head"] = 8 if proposal["n_embd"] % 8 == 0 else 4
+        proposal["intermediate_size"] = int(proposal["n_embd"] * 3)
+        description = f"n_embd {old} -> {proposal['n_embd']}"
     elif move == 3:
-        old = float(proposal["weight_decay"])
-        proposal["weight_decay"] = round(old / 3.0, 8)
-        description = f"weight_decay {old:g} -> {proposal['weight_decay']:g}"
+        choices = [2, 4, 6, 8, 12]
+        old = int(proposal["n_layer"])
+        proposal["n_layer"] = choices[min(choices.index(old) + 1, len(choices) - 1)]
+        description = f"n_layer {old} -> {proposal['n_layer']}"
     elif move == 4:
-        choices = [32, 64, 128, 256]
+        old = float(proposal["weight_decay"])
+        proposal["weight_decay"] = round(min(0.2, max(0.0, old / 2.0 if old > 0 else 0.01)), 8)
+        description = f"weight_decay {old:g} -> {proposal['weight_decay']:g}"
+    elif move == 5:
+        choices = [1, 2, 4, 8]
         old = int(proposal["batch_size"])
         proposal["batch_size"] = choices[min(choices.index(old) + 1, len(choices) - 1)]
         description = f"batch_size {old} -> {proposal['batch_size']}"
+    elif move == 6:
+        choices = [128, 256, 512, 1024]
+        old = int(proposal["max_seq_len"])
+        proposal["max_seq_len"] = choices[min(choices.index(old) + 1, len(choices) - 1)]
+        description = f"max_seq_len {old} -> {proposal['max_seq_len']}"
     else:
         old = float(proposal["beta2"])
-        proposal["beta2"] = 0.99 if old > 0.99 else 0.999
+        proposal["beta2"] = 0.99 if old > 0.99 else 0.95
         description = f"beta2 {old:g} -> {proposal['beta2']:g}"
     return proposal, description
 
@@ -177,9 +192,10 @@ def main() -> None:
     parser.add_argument("--ledger", type=Path, default=ROOT / "results.tsv")
     parser.add_argument("--artifacts", type=Path, default=ROOT / "artifacts")
     parser.add_argument("--iterations", type=int, default=4)
-    parser.add_argument("--budget-seconds", type=float, default=1.0)
+    parser.add_argument("--budget-seconds", type=float, default=30.0)
     parser.add_argument("--training-backend", choices=["auto", "cpu", "cuda"], default="auto")
-    parser.add_argument("--deployment", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("--benchmark-limit", type=int, default=32)
+    parser.add_argument("--bpb-batches", type=int, default=8)
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 
@@ -209,14 +225,15 @@ def main() -> None:
         args.artifacts,
         args.budget_seconds,
         args.training_backend,
-        args.deployment,
+        args.benchmark_limit,
+        args.bpb_batches,
     )
     append_ledger(args.ledger, best_metrics, "baseline", "none")
     write_json(args.best, best)
     print(
         f"baseline score={best_metrics['score']:.6f} "
-        f"loss={best_metrics['validation_loss']:.6f} "
-        f"deployment={best_metrics['deployment']['backend']} ",
+        f"bpb={best_metrics['bpb']:.6f} "
+        f"acc={best_metrics['mean_benchmark_acc']:.4f}",
         flush=True,
     )
 
@@ -233,7 +250,8 @@ def main() -> None:
                 args.artifacts,
                 args.budget_seconds,
                 args.training_backend,
-                args.deployment,
+                args.benchmark_limit,
+                args.bpb_batches,
             )
         except Exception as error:
             write_json(args.candidate, best)
@@ -246,8 +264,8 @@ def main() -> None:
         append_ledger(args.ledger, metrics, status, mutation)
         print(
             f"{status} score={metrics['score']:.6f} "
-            f"loss={metrics['validation_loss']:.6f} "
-            f"latency_ms={metrics['deployment']['latency_ms']:.4f}",
+            f"bpb={metrics['bpb']:.6f} "
+            f"acc={metrics['mean_benchmark_acc']:.4f}",
             flush=True,
         )
         if improved:
@@ -261,8 +279,9 @@ def main() -> None:
         "accepted_trials": accepted,
         "attempted_trials": args.iterations,
         "best_score": best_metrics["score"],
+        "best_bpb": best_metrics["bpb"],
+        "best_mean_benchmark_acc": best_metrics["mean_benchmark_acc"],
         "best_validation_loss": best_metrics["validation_loss"],
-        "best_deployment": best_metrics["deployment"],
         "best_candidate": best,
         "ledger": str(args.ledger.resolve()),
     }

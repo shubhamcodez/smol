@@ -21,15 +21,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ledger", type=Path, default=ROOT / "results.tsv")
     parser.add_argument("--best", type=Path, default=ROOT / "best.json")
-    parser.add_argument("--expected-deployment", default="cuda", choices=["cuda", "cpu", "torch-cuda", "numpy-cpu"])
     args = parser.parse_args()
-
-    expected = {
-        "cuda": "torch-cuda",
-        "torch-cuda": "torch-cuda",
-        "cpu": "numpy-cpu",
-        "numpy-cpu": "numpy-cpu",
-    }[args.expected_deployment]
 
     with args.ledger.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
@@ -43,12 +35,12 @@ def main() -> None:
     for row in rows:
         if row["status"] == "crash":
             continue
-        require(
-            row["deployment_backend"] == expected,
-            f"{row['run_id']} used the wrong deployment backend "
-            f"(got {row['deployment_backend']!r}, expected {expected!r})",
-        )
         score = float(row["score"])
+        require("bpb" in row and row["bpb"] != "", f"{row['run_id']} missing bpb")
+        require(
+            "mean_benchmark_acc" in row and row["mean_benchmark_acc"] != "",
+            f"{row['run_id']} missing mean_benchmark_acc",
+        )
         if row["status"] == "keep":
             require(score < best_score, f"kept run {row['run_id']} did not improve")
             best_score = score
@@ -61,7 +53,6 @@ def main() -> None:
     require(best == last_kept, "best.json does not match the last kept candidate")
     report: dict[str, Any] = {
         "passed": True,
-        "expected_deployment": expected,
         "experiments": len(rows),
         "kept": kept,
         "discarded": discarded,

@@ -1,9 +1,14 @@
 {
-  "hidden_dim": 128,
-  "learning_rate": 0.00098,
-  "weight_decay": 0.01,
-  "batch_size": 64,
+  "n_layer": 4,
+  "n_embd": 256,
+  "n_head": 8,
+  "n_kv_head": 2,
+  "intermediate_size": 768,
+  "max_seq_len": 256,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.1,
+  "batch_size": 2,
   "beta1": 0.9,
-  "beta2": 0.999,
+  "beta2": 0.95,
   "seed": 1337
 }
