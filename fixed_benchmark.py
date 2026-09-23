@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -112,40 +111,73 @@ def _load_matching_weights(model: torch.nn.Module, state_dict: dict[str, Any]) -
     return loaded / max(total, 1)
 
 
+def _meter(fraction: float, width: int = 10) -> str:
+    fraction = max(0.0, min(1.0, fraction))
+    filled = int(round(fraction * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+def gpu_memory_text(device: torch.device) -> str:
+    """Memory meter: `███████░░░  4.2 gb/  6.0 gb used`."""
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return f"{_meter(0)}  0.0 gb/  0.0 gb used"
+    free_b, total_b = torch.cuda.mem_get_info(device)
+    used = (total_b - free_b) / 2**30
+    total = total_b / 2**30
+    fraction = used / total if total else 0.0
+    return f"{_meter(fraction)} {used:4.1f} gb/ {total:4.1f} gb used"
+
+
+def gpu_memory_line(device: torch.device) -> str:
+    return f"gpu {gpu_memory_text(device)}"
+
+
+def _param_label(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
+def print_run_log(metrics: dict[str, Any], device: torch.device) -> None:
+    tasks = metrics.get("task_accuracy") or {}
+    task_text = "   ".join(f"{name} {float(acc):.0%}" for name, acc in tasks.items())
+    print(
+        f"{'score':<8} {metrics['score']:.4f}    "
+        f"{'bpb':<6} {metrics['bpb']:.4f}    "
+        f"{'loss':<6} {metrics['validation_loss']:.4f}    "
+        f"{'acc':<6} {float(metrics['mean_benchmark_acc']):.1%}",
+        flush=True,
+    )
+    if task_text:
+        print(f"{'tasks':<8} {task_text}", flush=True)
+    print(
+        f"{'train':<8} {metrics['training_steps']} steps    "
+        f"{float(metrics['training_seconds']):.0f}s    "
+        f"{_param_label(int(metrics['parameter_count']))} params    "
+        f"{metrics['training_backend']}",
+        flush=True,
+    )
+    print(f"{'gpu':<8} {gpu_memory_text(device)}", flush=True)
+
+
 class _Usage:
-    """CPU percent, and GPU percent when CUDA is available. Both are sampled at most once a second."""
+    """CPU percent and GPU memory, each sampled at most once a second."""
 
     def __init__(self) -> None:
         psutil.cpu_percent(interval=None)
-        self._gpu = 0.0
+        self._gpu = gpu_memory_line(torch.device("cpu"))
         self._cpu = 0.0
         self._at = 0.0
 
-    def snapshot(self, device: torch.device) -> tuple[float, float]:
+    def snapshot(self, device: torch.device) -> tuple[str, float]:
         now = time.perf_counter()
         if now - self._at < 1.0:
             return self._gpu, self._cpu
         self._at = now
         self._cpu = float(psutil.cpu_percent(interval=None))
-        if device.type != "cuda":
-            self._gpu = 0.0
-            return self._gpu, self._cpu
-        try:
-            self._gpu = float(torch.cuda.utilization(0))
-        except Exception:
-            try:
-                raw = subprocess.check_output(
-                    [
-                        "nvidia-smi",
-                        "--query-gpu=utilization.gpu",
-                        "--format=csv,noheader,nounits",
-                    ],
-                    text=True,
-                    timeout=2,
-                )
-                self._gpu = float(raw.strip().splitlines()[0])
-            except (OSError, subprocess.SubprocessError, ValueError):
-                self._gpu = 0.0
+        self._gpu = gpu_memory_line(device)
         return self._gpu, self._cpu
 
 
@@ -179,7 +211,8 @@ def train_for_budget(
         # Same-budget trials must start from the same tensors. A shape-changing
         # edit keeps whatever still matches and reports how much transferred.
         resumed = coverage >= 0.99
-        print(f"INIT_CHECKPOINT coverage={coverage:.3f} resumed={resumed}", flush=True)
+        state = "resumed" if resumed else "partial"
+        print(f"{'weights':<8} {coverage:.0%} loaded    {state}", flush=True)
 
     activations = (
         int(candidate["batch_size"])
@@ -211,7 +244,7 @@ def train_for_budget(
     progress = tqdm(
         total=budget_ticks,
         desc="train",
-        bar_format="{l_bar}{bar}| {n}/{total}s [{elapsed}<{remaining}{postfix}]",
+        bar_format="{l_bar}{bar}| {n}/{total}s [{elapsed}<{remaining}]  {postfix}",
         dynamic_ncols=True,
         leave=True,
         mininterval=0.5,
@@ -240,19 +273,20 @@ def train_for_budget(
                 torch.cuda.synchronize()
             elapsed = time.perf_counter() - start
             tokens_seen = step * tokens_per_step
-            gpu, cpu = usage.snapshot(device)
-            postfix: dict[str, str | int] = {
-                "data": f"{_token_label(tokens_seen)}/{_token_label(shard_tokens)}",
-                "iter": step,
-                "it/s": f"{step / elapsed:.2f}" if elapsed > 0 else "0",
-                "gpu": f"{gpu:.0f}%",
-                "cpu": f"{cpu:.0f}%",
-            }
+            gpu_line, cpu = usage.snapshot(device)
+            rate = f"{step / elapsed:.2f}" if elapsed > 0 else "0.00"
+            bits = [
+                f"data {_token_label(tokens_seen)}/{_token_label(shard_tokens)}",
+                f"iter {step}",
+                f"{rate} it/s",
+                gpu_line,
+                f"cpu {_meter(cpu / 100.0)} {cpu:3.0f}%",
+            ]
             # A single partial pass of the shard is not labeled as an epoch.
             if tokens_seen >= shard_tokens:
-                postfix = {"epoch": f"{tokens_seen / shard_tokens:.1f}", **postfix}
+                bits.insert(0, f"epoch {tokens_seen / shard_tokens:.1f}")
             progress.n = min(int(elapsed), budget_ticks)
-            progress.set_postfix(postfix, refresh=False)
+            progress.set_postfix_str("   ".join(bits), refresh=False)
             progress.refresh()
     finally:
         progress.n = min(int(time.perf_counter() - start), budget_ticks)
@@ -333,15 +367,13 @@ def main() -> None:
         "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint else None,
         "paper_ids": paper_ids,
         "candidate": candidate,
-        "runtime_inventory": detect_runtime().to_dict(),
-        "score_formula": "bpb + 2.0 * (1 - mean_benchmark_acc) + 1e-9 * params",
     }
     from checkpointing import save_best_checkpoint
 
     # Per-run checkpoint (promoted to checkpoints/best by the loop on keep).
     save_best_checkpoint(model, candidate, metrics, root=run_dir, paper_ids=paper_ids)
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
-    print("AUTORESEARCH_METRICS " + json.dumps(metrics, separators=(",", ":")))
+    print_run_log(metrics, device)
 
 
 if __name__ == "__main__":

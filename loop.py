@@ -48,6 +48,30 @@ def short_hash(candidate: dict[str, Any]) -> str:
     return hashlib.sha256(canonical(candidate).encode("utf-8")).hexdigest()[:10]
 
 
+_STATUS_COLOR = {
+    "keep": "32",
+    "baseline": "36",
+    "discard": "33",
+    "crash": "31",
+}
+
+
+def _log(label: str, message: str = "") -> None:
+    padded = f"{label:<8}"
+    color = _STATUS_COLOR.get(label)
+    if color:
+        padded = f"\033[{color}m{padded}\033[0m"
+    print(f"{padded} {message}".rstrip(), flush=True)
+
+
+def _score_text(metrics: dict[str, Any]) -> str:
+    return (
+        f"score {metrics['score']:.4f}    "
+        f"bpb {metrics['bpb']:.4f}    "
+        f"acc {float(metrics['mean_benchmark_acc']):.1%}"
+    )
+
+
 def write_json(path: Path, value: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
@@ -171,7 +195,7 @@ def snapshot_architecture(resume: bool) -> None:
     MODEL_KEEP.parent.mkdir(parents=True, exist_ok=True)
     if resume and MODEL_KEEP.exists():
         shutil.copy2(MODEL_KEEP, MODEL_PATH)
-        print(f"Resuming architecture from {MODEL_KEEP}", flush=True)
+        _log("resume", f"architecture  {MODEL_KEEP}")
     else:
         shutil.copy2(MODEL_PATH, MODEL_KEEP)
     if not MODEL_BASELINE.exists():
@@ -339,10 +363,7 @@ def main() -> None:
     if not api_key:
         raise SystemExit("XAI_API_KEY is missing from .env")
     snapshot_architecture(args.resume)
-    print(
-        "Each trial searches for a method, then rewrites model.py from that paper.",
-        flush=True,
-    )
+    _log("loop", "each trial searches for a method, then rewrites model.py")
 
     if args.reset:
         if args.ledger.exists():
@@ -359,7 +380,7 @@ def main() -> None:
         if ckpt_candidate.exists():
             best = json.loads(ckpt_candidate.read_text(encoding="utf-8"))
             write_json(args.best, best)
-            print(f"Resuming candidate from {ckpt_candidate}", flush=True)
+            _log("resume", f"candidate  {ckpt_candidate}")
         else:
             best = json.loads((args.best if args.best.exists() else args.candidate).read_text(encoding="utf-8"))
     else:
@@ -376,7 +397,8 @@ def main() -> None:
             shutil.rmtree(session_init)
         shutil.copytree(init_checkpoint, session_init)
     baseline_id = f"{session}-baseline-{short_hash(best)}"
-    print(f"Evaluating baseline {baseline_id}", flush=True)
+    print(flush=True)
+    _log("baseline", baseline_id)
     best_metrics = evaluate(
         args.candidate,
         best,
@@ -394,13 +416,8 @@ def main() -> None:
     record_our_run(args.scores, best_metrics, "baseline")
     write_json(args.best, best)
     promote_checkpoint(args.artifacts / baseline_id, args.checkpoint_dir)
-    print(
-        f"baseline score={best_metrics['score']:.6f} "
-        f"bpb={best_metrics['bpb']:.6f} "
-        f"acc={best_metrics['mean_benchmark_acc']:.4f} "
-        f"resumed={best_metrics.get('resumed_from_checkpoint')}",
-        flush=True,
-    )
+    resumed = "resumed" if best_metrics.get("resumed_from_checkpoint") else "fresh"
+    _log("baseline", f"{_score_text(best_metrics)}    {resumed}")
 
     accepted = 0
     for index in range(args.iterations):
@@ -412,10 +429,9 @@ def main() -> None:
                 papers_tail=tail_text(ROOT / "papers.tsv"),
                 known=known_ids(ROOT / "papers.tsv"),
             )
-            print(
-                f"search {found['query']!r} -> {found['arxiv_id']} {found['title']}",
-                flush=True,
-            )
+            print(flush=True)
+            _log("search", f"{found['arxiv_id']}  {found['title']}")
+            _log("", found["query"])
             remember_paper(found["arxiv_id"], found["title"], found.get("summary") or found["query"])
             arch = propose_architecture(
                 api_key,
@@ -431,7 +447,7 @@ def main() -> None:
             restore_architecture()
             run_id = f"{session}-trial{index + 1:02d}-search"
             append_crash(args.ledger, run_id, "method search", best, error, [])
-            print(f"discard {run_id}: {error}", flush=True)
+            _log("discard", f"{run_id}  {error}")
             continue
         proposal = best
         mutation = arch.idea
@@ -439,9 +455,9 @@ def main() -> None:
         trial_papers = [arch.paper_id]
         remember_paper(arch.paper_id, arch.paper_title, arch.summary)
         run_id = f"{session}-trial{index + 1:02d}-{short_hash(proposal)}"
-        print(f"Evaluating {run_id}: {mutation}", flush=True)
+        _log("trial", f"{index + 1:02d}  {mutation}")
         if paper_line:
-            print(f"  paper {paper_line}", flush=True)
+            _log("paper", paper_line)
             mutation = f"{mutation} || {paper_line}"
         try:
             metrics = evaluate(
@@ -461,19 +477,15 @@ def main() -> None:
             write_json(args.candidate, best)
             restore_architecture()
             append_crash(args.ledger, run_id, mutation, proposal, error, trial_papers)
-            print(f"discard {run_id}: evaluator error: {error}", flush=True)
+            _log("discard", f"{index + 1:02d}  {error}")
             continue
 
         improved = metrics["score"] < best_metrics["score"] - MIN_IMPROVEMENT
         status = "keep" if improved else "discard"
         append_ledger(args.ledger, metrics, status, mutation)
         record_our_run(args.scores, metrics, status)
-        print(
-            f"{status} score={metrics['score']:.6f} "
-            f"bpb={metrics['bpb']:.6f} "
-            f"acc={metrics['mean_benchmark_acc']:.4f}",
-            flush=True,
-        )
+        delta = float(metrics["score"]) - float(best_metrics["score"])
+        _log(status, f"{_score_text(metrics)}    vs best {delta:+.4f}")
         if improved:
             best = proposal
             best_metrics = metrics
@@ -495,6 +507,8 @@ def main() -> None:
                     ],
                     cwd=ROOT,
                     check=False,
+                    capture_output=True,
+                    text=True,
                 )
         else:
             restore_architecture()
@@ -512,6 +526,8 @@ def main() -> None:
                     ],
                     cwd=ROOT,
                     check=False,
+                    capture_output=True,
+                    text=True,
                 )
         write_json(args.candidate, best)
 
@@ -528,14 +544,22 @@ def main() -> None:
     }
     summary_path = args.artifacts / f"{session}-summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    print("AUTORESEARCH_SUMMARY " + json.dumps(summary, separators=(",", ":")))
+    print(flush=True)
+    _log("done", f"{accepted}/{args.iterations} kept")
+    _log(
+        "best",
+        f"score {best_metrics['score']:.4f}    "
+        f"bpb {best_metrics['bpb']:.4f}    "
+        f"acc {float(best_metrics['mean_benchmark_acc']):.1%}    "
+        f"loss {best_metrics['validation_loss']:.4f}",
+    )
     plot_path = ROOT / "progress.png"
     try:
         write_progress_plot(args.ledger, plot_path)
     except Exception as error:
-        print(f"progress plot skipped: {error}", flush=True)
+        _log("plot", f"skipped  {error}")
     else:
-        print(f"Wrote {plot_path}", flush=True)
+        _log("plot", str(plot_path))
 
 
 if __name__ == "__main__":
