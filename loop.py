@@ -158,16 +158,13 @@ def evaluate(
     completed = subprocess.run(
         command,
         cwd=ROOT,
-        text=True,
-        capture_output=True,
         timeout=max(600.0, budget_seconds + 480.0),
         check=False,
     )
-    for line in reversed(completed.stdout.splitlines()):
-        if line.startswith("AUTORESEARCH_METRICS "):
-            return json.loads(line.removeprefix("AUTORESEARCH_METRICS "))
-    details = (completed.stdout + "\n" + completed.stderr)[-8000:]
-    raise RuntimeError(f"evaluator failed with exit code {completed.returncode}:\n{details}")
+    metrics_path = artifacts / run_id / "metrics.json"
+    if completed.returncode == 0 and metrics_path.exists():
+        return json.loads(metrics_path.read_text(encoding="utf-8"))
+    raise RuntimeError(f"evaluator failed with exit code {completed.returncode}")
 
 
 def snapshot_architecture(resume: bool) -> None:

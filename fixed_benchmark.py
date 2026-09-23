@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
+import psutil
 import torch
+from tqdm import tqdm
 
 from backend import detect_runtime
 from model import ModelConfig, TransformerLM
@@ -109,6 +112,51 @@ def _load_matching_weights(model: torch.nn.Module, state_dict: dict[str, Any]) -
     return loaded / max(total, 1)
 
 
+class _Usage:
+    """CPU percent, and GPU percent when CUDA is available. Both are sampled at most once a second."""
+
+    def __init__(self) -> None:
+        psutil.cpu_percent(interval=None)
+        self._gpu = 0.0
+        self._cpu = 0.0
+        self._at = 0.0
+
+    def snapshot(self, device: torch.device) -> tuple[float, float]:
+        now = time.perf_counter()
+        if now - self._at < 1.0:
+            return self._gpu, self._cpu
+        self._at = now
+        self._cpu = float(psutil.cpu_percent(interval=None))
+        if device.type != "cuda":
+            self._gpu = 0.0
+            return self._gpu, self._cpu
+        try:
+            self._gpu = float(torch.cuda.utilization(0))
+        except Exception:
+            try:
+                raw = subprocess.check_output(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=utilization.gpu",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    text=True,
+                    timeout=2,
+                )
+                self._gpu = float(raw.strip().splitlines()[0])
+            except (OSError, subprocess.SubprocessError, ValueError):
+                self._gpu = 0.0
+        return self._gpu, self._cpu
+
+
+def _token_label(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.2f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
 def train_for_budget(
     candidate: dict[str, Any],
     train_shard: TokenShard,
@@ -156,27 +204,59 @@ def train_for_budget(
         torch.cuda.synchronize()
     start = time.perf_counter()
     step = 0
-    while step < 5 or time.perf_counter() - start < budget_seconds:
-        step += 1
-        inputs, targets = train_shard.sample_batch(batch_size, seq_len, generator, device)
-        optimizer.zero_grad(set_to_none=True)
-        vocab = int(model.config.vocab_size)
-        logit_bytes = batch_size * seq_len * vocab * 2
-        loss_chunk = seq_len if logit_bytes < 256_000_000 else min(128, seq_len)
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-            result = model(
-                inputs,
-                targets=targets,
-                return_logits=False,
-                loss_chunk_size=loss_chunk,
-            )
-        if result.loss is None:
-            raise RuntimeError("training step did not return a loss")
-        scaler.scale(result.loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        if device.type == "cuda" and step % 5 == 0:
-            torch.cuda.synchronize()
+    tokens_per_step = batch_size * seq_len
+    shard_tokens = max(len(train_shard), 1)
+    usage = _Usage()
+    budget_ticks = max(int(round(budget_seconds)), 1)
+    progress = tqdm(
+        total=budget_ticks,
+        desc="train",
+        unit="s",
+        dynamic_ncols=True,
+        leave=True,
+        mininterval=0.5,
+    )
+    try:
+        while step < 5 or time.perf_counter() - start < budget_seconds:
+            step += 1
+            inputs, targets = train_shard.sample_batch(batch_size, seq_len, generator, device)
+            optimizer.zero_grad(set_to_none=True)
+            vocab = int(model.config.vocab_size)
+            logit_bytes = batch_size * seq_len * vocab * 2
+            loss_chunk = seq_len if logit_bytes < 256_000_000 else min(128, seq_len)
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+                result = model(
+                    inputs,
+                    targets=targets,
+                    return_logits=False,
+                    loss_chunk_size=loss_chunk,
+                )
+            if result.loss is None:
+                raise RuntimeError("training step did not return a loss")
+            scaler.scale(result.loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            if device.type == "cuda" and step % 5 == 0:
+                torch.cuda.synchronize()
+            elapsed = time.perf_counter() - start
+            tokens_seen = step * tokens_per_step
+            gpu, cpu = usage.snapshot(device)
+            postfix: dict[str, str | int] = {
+                "data": f"{_token_label(tokens_seen)}/{_token_label(shard_tokens)}",
+                "iter": step,
+                "gpu": f"{gpu:.0f}%",
+                "cpu": f"{cpu:.0f}%",
+            }
+            # A single partial pass of the shard is not labeled as an epoch.
+            if tokens_seen >= shard_tokens:
+                postfix = {"epoch": f"{tokens_seen / shard_tokens:.1f}", **postfix}
+            progress.n = min(int(elapsed), budget_ticks)
+            progress.set_postfix(postfix, refresh=False)
+            progress.refresh()
+    finally:
+        progress.n = min(int(time.perf_counter() - start), budget_ticks)
+        progress.refresh()
+        progress.close()
     if device.type == "cuda":
         torch.cuda.synchronize()
     return model, step, time.perf_counter() - start, resumed
