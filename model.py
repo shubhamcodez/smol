@@ -12,12 +12,14 @@ selected modern decoder features:
 * tied token embedding and output weights
 * memory-efficient KV caching for autoregressive generation
 * residual-projection initialization scaled by model depth
+* Gemma 2 sequential pre- and post-RMSNorm around attention and MLP
+  (Gemma Team, 2024) instead of PaLM parallel residuals
 
 The default configuration has 203,821,824 trainable parameters plus a small
-QK-Norm overhead, and a 4,096 token context window. It targets full-parameter
-mixed-precision training on a 6GB RTX 3070 with micro-batch size 1 and
-gradient checkpointing. A tokenizer, dataset, training loop, and trained
-weights are still required.
+QK-Norm and post-norm overhead, and a 4,096 token context window. It targets
+full-parameter mixed-precision training on a 6GB RTX 3070 with micro-batch
+size 1 and gradient checkpointing. A tokenizer, dataset, training loop, and
+trained weights are still required.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ class ModelConfig:
     max_seq_len: int = 4_096
 
     # Default architecture: 203,821,824 parameters with tied embeddings
-    # (plus 2 * n_layer * head_dim QK-Norm scale parameters).
+    # (plus QK-Norm and Gemma-2 post-norm scale parameters).
     n_layer: int = 24
     n_embd: int = 768
     n_head: int = 12
@@ -258,12 +260,16 @@ class SwiGLU(nn.Module):
 
 
 class DecoderBlock(nn.Module):
+    """Gemma 2 sequential residuals with pre- and post-RMSNorm on each sublayer."""
+
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
-        self.attn_norm = RMSNorm(config.n_embd, config.norm_eps)
+        self.pre_attn_norm = RMSNorm(config.n_embd, config.norm_eps)
         self.attn = GroupedQueryAttention(config)
-        self.mlp_norm = RMSNorm(config.n_embd, config.norm_eps)
+        self.post_attn_norm = RMSNorm(config.n_embd, config.norm_eps)
+        self.pre_mlp_norm = RMSNorm(config.n_embd, config.norm_eps)
         self.mlp = SwiGLU(config)
+        self.post_mlp_norm = RMSNorm(config.n_embd, config.norm_eps)
 
     def forward(
         self,
@@ -272,12 +278,12 @@ class DecoderBlock(nn.Module):
         use_cache: bool = False,
     ) -> tuple[torch.Tensor, Optional[KVCache]]:
         attention, present = self.attn(
-            self.attn_norm(x),
+            self.pre_attn_norm(x),
             past_key_value=past_key_value,
             use_cache=use_cache,
         )
-        x = x + attention
-        x = x + self.mlp(self.mlp_norm(x))
+        x = x + self.post_attn_norm(attention)
+        x = x + self.post_mlp_norm(self.mlp(self.pre_mlp_norm(x)))
         return x, present
 
 
@@ -535,7 +541,8 @@ def default_parameter_count() -> int:
         + config.n_embd * config.n_embd
     )
     mlp = 3 * config.n_embd * config.intermediate_size
-    norms_per_layer = 2 * config.n_embd
+    # Gemma 2: four RMSNorms per layer (pre/post attn, pre/post MLP).
+    norms_per_layer = 4 * config.n_embd
     qk_norm = 2 * head_dim if config.qk_norm else 0
     transformer = config.n_layer * (attention + mlp + norms_per_layer + qk_norm)
     final_norm = config.n_embd
