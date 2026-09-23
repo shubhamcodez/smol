@@ -12,14 +12,13 @@ selected modern decoder features:
 * tied token embedding and output weights
 * memory-efficient KV caching for autoregressive generation
 * residual-projection initialization scaled by model depth
-* Gemma 2 sequential pre- and post-RMSNorm around attention and MLP
-  (Gemma Team, 2024) instead of PaLM parallel residuals
+* parallel attention+MLP residual (PaLM; Chowdhery et al. 2022)
 
 The default configuration has 203,821,824 trainable parameters plus a small
-QK-Norm and post-norm overhead, and a 4,096 token context window. It targets
-full-parameter mixed-precision training on a 6GB RTX 3070 with micro-batch
-size 1 and gradient checkpointing. A tokenizer, dataset, training loop, and
-trained weights are still required.
+QK-Norm overhead, and a 4,096 token context window. It targets full-parameter
+mixed-precision training on a 6GB RTX 3070 with micro-batch size 1 and
+gradient checkpointing. A tokenizer, dataset, training loop, and trained
+weights are still required.
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ class ModelConfig:
     max_seq_len: int = 4_096
 
     # Default architecture: 203,821,824 parameters with tied embeddings
-    # (plus QK-Norm and Gemma-2 post-norm scale parameters).
+    # (plus 2 * n_layer * head_dim QK-Norm scale parameters).
     n_layer: int = 24
     n_embd: int = 768
     n_head: int = 12
@@ -260,16 +259,13 @@ class SwiGLU(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    """Gemma 2 sequential residuals with pre- and post-RMSNorm on each sublayer."""
+    """PaLM-style parallel residual: x + Attn(LN(x)) + MLP(LN(x))."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
-        self.pre_attn_norm = RMSNorm(config.n_embd, config.norm_eps)
+        self.norm = RMSNorm(config.n_embd, config.norm_eps)
         self.attn = GroupedQueryAttention(config)
-        self.post_attn_norm = RMSNorm(config.n_embd, config.norm_eps)
-        self.pre_mlp_norm = RMSNorm(config.n_embd, config.norm_eps)
         self.mlp = SwiGLU(config)
-        self.post_mlp_norm = RMSNorm(config.n_embd, config.norm_eps)
 
     def forward(
         self,
@@ -277,13 +273,13 @@ class DecoderBlock(nn.Module):
         past_key_value: Optional[KVCache] = None,
         use_cache: bool = False,
     ) -> tuple[torch.Tensor, Optional[KVCache]]:
+        h = self.norm(x)
         attention, present = self.attn(
-            self.pre_attn_norm(x),
+            h,
             past_key_value=past_key_value,
             use_cache=use_cache,
         )
-        x = x + self.post_attn_norm(attention)
-        x = x + self.post_mlp_norm(self.mlp(self.pre_mlp_norm(x)))
+        x = x + attention + self.mlp(h)
         return x, present
 
 
@@ -541,8 +537,7 @@ def default_parameter_count() -> int:
         + config.n_embd * config.n_embd
     )
     mlp = 3 * config.n_embd * config.intermediate_size
-    # Gemma 2: four RMSNorms per layer (pre/post attn, pre/post MLP).
-    norms_per_layer = 4 * config.n_embd
+    norms_per_layer = config.n_embd  # shared pre-norm in the parallel block
     qk_norm = 2 * head_dim if config.qk_norm else 0
     transformer = config.n_layer * (attention + mlp + norms_per_layer + qk_norm)
     final_norm = config.n_embd

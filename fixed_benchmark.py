@@ -211,7 +211,7 @@ def train_for_budget(
     progress = tqdm(
         total=budget_ticks,
         desc="train",
-        unit="s",
+        bar_format="{l_bar}{bar}| {n}/{total}s [{elapsed}<{remaining}{postfix}]",
         dynamic_ncols=True,
         leave=True,
         mininterval=0.5,
@@ -244,6 +244,7 @@ def train_for_budget(
             postfix: dict[str, str | int] = {
                 "data": f"{_token_label(tokens_seen)}/{_token_label(shard_tokens)}",
                 "iter": step,
+                "it/s": f"{step / elapsed:.2f}" if elapsed > 0 else "0",
                 "gpu": f"{gpu:.0f}%",
                 "cpu": f"{cpu:.0f}%",
             }
