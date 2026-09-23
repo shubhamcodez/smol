@@ -12,10 +12,13 @@ selected modern decoder features:
 * tied token embedding and output weights
 * memory-efficient KV caching for autoregressive generation
 * residual-projection initialization scaled by model depth
-* parallel attention+MLP residual (PaLM; Chowdhery et al. 2022)
+* PaLM parallel residual: Attention and MLP on the same pre-normed hidden
+  state, added together (Chowdhery et al. 2022)
 
-The default configuration has 203,821,824 trainable parameters plus a small
-QK-Norm overhead, and a 4,096 token context window. It targets full-parameter
+Paper 2506.02523 studies MLA reuse vs recompute of latent projections; applying
+true MLA would change KV tensor sizes, which is disallowed for this checkpoint.
+The default configuration has 203,821,824 trainable parameters plus QK-Norm
+scale parameters, and a 4,096 token context window. It targets full-parameter
 mixed-precision training on a 6GB RTX 3070 with micro-batch size 1 and
 gradient checkpointing. A tokenizer, dataset, training loop, and trained
 weights are still required.
@@ -51,7 +54,7 @@ class ModelConfig:
     max_seq_len: int = 4_096
 
     # Default architecture: 203,821,824 parameters with tied embeddings
-    # (plus 2 * n_layer * head_dim QK-Norm scale parameters).
+    # (plus QK-Norm scale parameters).
     n_layer: int = 24
     n_embd: int = 768
     n_head: int = 12
@@ -83,7 +86,6 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Accumulating the variance in fp32 is more stable for fp16/bfloat16.
         variance = x.float().pow(2).mean(dim=-1, keepdim=True)
         normalized = x.float() * torch.rsqrt(variance + self.eps)
         return (normalized * self.weight.float()).to(dtype=x.dtype)
@@ -117,7 +119,6 @@ def _apply_rope(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
-    # x: [batch, heads, sequence, head_dim]
     cos = cos[None, None, :, :]
     sin = sin[None, None, :, :]
     return (x * cos) + (_rotate_half(x) * sin)
@@ -150,7 +151,6 @@ class GroupedQueryAttention(nn.Module):
         self.o_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.rope = RotaryEmbedding(self.head_dim, config.rope_theta)
-        # QK-Norm: RMSNorm over head_dim for Q and K (ViT-22B / Gemma 2).
         self.q_norm = RMSNorm(self.head_dim, config.norm_eps) if config.qk_norm else None
         self.k_norm = RMSNorm(self.head_dim, config.norm_eps) if config.qk_norm else None
 
@@ -214,7 +214,6 @@ class GroupedQueryAttention(nn.Module):
                 enable_gqa=self.n_head != self.n_kv_head,
             )
         else:
-            # Compatibility path for older PyTorch builds without native GQA.
             expanded_k = k.repeat_interleave(self.kv_groups, dim=1)
             expanded_v = v.repeat_interleave(self.kv_groups, dim=1)
             scores = torch.matmul(q, expanded_k.transpose(-2, -1)) / math.sqrt(
@@ -259,7 +258,7 @@ class SwiGLU(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    """PaLM-style parallel residual: x + Attn(LN(x)) + MLP(LN(x))."""
+    """PaLM parallel residual: y = x + Attn(LN(x)) + MLP(LN(x))."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -344,7 +343,7 @@ class TransformerLM(nn.Module):
             raise ValueError("input_ids must have shape [batch, sequence]")
 
         batch_size, sequence_len = input_ids.shape
-        del batch_size  # The value is documented by the shape check above.
+        del batch_size
         past_len = 0 if past_key_values is None else past_key_values[0][0].size(2)
         if past_len + sequence_len > self.config.max_seq_len:
             raise ValueError(
@@ -395,9 +394,6 @@ class TransformerLM(nn.Module):
             if loss_chunk_size <= 0:
                 raise ValueError("loss_chunk_size must be positive")
 
-            # Checkpointing the vocabulary projection prevents an entire
-            # [batch, 4096, vocab] logits tensor from staying live for backward.
-            # This is important on a 6GB GPU with the 50,304-token vocabulary.
             chunk_losses = []
             for start in range(0, x.size(1), loss_chunk_size):
                 end = min(start + loss_chunk_size, x.size(1))
@@ -537,7 +533,7 @@ def default_parameter_count() -> int:
         + config.n_embd * config.n_embd
     )
     mlp = 3 * config.n_embd * config.intermediate_size
-    norms_per_layer = config.n_embd  # shared pre-norm in the parallel block
+    norms_per_layer = config.n_embd  # shared pre-norm for parallel residual
     qk_norm = 2 * head_dim if config.qk_norm else 0
     transformer = config.n_layer * (attention + mlp + norms_per_layer + qk_norm)
     final_norm = config.n_embd
@@ -545,7 +541,6 @@ def default_parameter_count() -> int:
     return embedding + transformer + final_norm + output
 
 
-# Backward-compatible names for code written against the earlier 1B draft.
 Hybrid1BConfig = ModelConfig
 Hybrid1B = TransformerLM
 
