@@ -3,7 +3,7 @@
 This combines a straightforward nanoGPT-style PyTorch training interface with
 selected modern decoder features:
 
-* pre-normalized RMSNorm transformer blocks
+* sandwich RMSNorm transformer blocks (Gemma 2; arXiv:2408.00118)
 * rotary position embeddings (RoPE)
 * grouped-query attention (GQA)
 * QK-Norm (RMSNorm on queries and keys; Dehghani et al. 2023 / Gemma 2)
@@ -12,18 +12,15 @@ selected modern decoder features:
 * tied token embedding and output weights
 * memory-efficient KV caching for autoregressive generation
 * residual-projection initialization scaled by model depth
-* Gemma 2 sandwich RMSNorm (pre- and post-norm on attn and MLP; Gemma Team 2024)
 * gated attention (sigmoid gate on attn output; Qiu et al. 2025, arXiv:2505.06708)
-* Differential Transformer attention (Ye et al. 2024, arXiv:2410.05258):
-  two causal softmax maps subtracted with a learned λ to cancel common-mode noise
 
 Paper 2506.02523 studies MLA reuse vs recompute of latent projections; applying
 true MLA would change KV tensor sizes, which is disallowed for this checkpoint.
 The default configuration has 203,821,824 trainable parameters plus QK-Norm,
-sandwich-norm, gated-attention, and differential-λ scale parameters, and a 4,096
-token context window. It targets full-parameter mixed-precision training on a
-6GB RTX 3070 with micro-batch size 1 and gradient checkpointing. A tokenizer,
-dataset, training loop, and trained weights are still required.
+sandwich-norm, and gated-attention scale parameters, and a 4,096 token context
+window. It targets full-parameter mixed-precision training on a 6GB RTX 3070 with
+micro-batch size 1 and gradient checkpointing. A tokenizer, dataset,
+training loop, and trained weights are still required.
 """
 
 from __future__ import annotations
@@ -56,7 +53,7 @@ class ModelConfig:
     max_seq_len: int = 4_096
 
     # Default architecture: 203,821,824 parameters with tied embeddings
-    # (plus QK-Norm, sandwich RMSNorm, gated-attention, and DiffAttn λ).
+    # (plus QK-Norm, sandwich-norm, and gated-attention scale parameters).
     n_layer: int = 24
     n_embd: int = 768
     n_head: int = 12
@@ -70,7 +67,6 @@ class ModelConfig:
     tie_embeddings: bool = True
     qk_norm: bool = True
     gated_attention: bool = True
-    differential_attention: bool = True
 
     def __post_init__(self) -> None:
         if self.n_embd % self.n_head != 0:
@@ -79,8 +75,6 @@ class ModelConfig:
             raise ValueError("n_head must be divisible by n_kv_head")
         if (self.n_embd // self.n_head) % 2 != 0:
             raise ValueError("attention head size must be even for RoPE")
-        if self.differential_attention and (self.n_head % 2 != 0 or self.n_kv_head % 2 != 0):
-            raise ValueError("differential attention requires even n_head and n_kv_head")
         if self.vocab_size <= 0 or self.max_seq_len <= 0:
             raise ValueError("vocab_size and max_seq_len must be positive")
 
@@ -138,7 +132,6 @@ class GroupedQueryAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         self.kv_groups = config.n_head // config.n_kv_head
         self.dropout = config.dropout
-        self.differential_attention = config.differential_attention
 
         self.q_proj = nn.Linear(
             config.n_embd,
@@ -165,49 +158,6 @@ class GroupedQueryAttention(nn.Module):
             if config.gated_attention
             else None
         )
-        # Differential Transformer λ (Ye et al. 2024): softmax1 − λ softmax2.
-        self.diff_lambda = (
-            nn.Parameter(torch.tensor(0.5)) if config.differential_attention else None
-        )
-
-    def _sdpa(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
-        is_causal: bool,
-        dropout_p: float,
-        sequence_len: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-        if hasattr(F, "scaled_dot_product_attention"):
-            return F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=attention_mask,
-                dropout_p=dropout_p,
-                is_causal=is_causal,
-                enable_gqa=q.size(1) != k.size(1),
-            )
-        kv_groups = q.size(1) // k.size(1)
-        expanded_k = k.repeat_interleave(kv_groups, dim=1)
-        expanded_v = v.repeat_interleave(kv_groups, dim=1)
-        scores = torch.matmul(q, expanded_k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if attention_mask is not None:
-            scores = scores.masked_fill(~attention_mask, float("-inf"))
-        else:
-            causal_mask = torch.ones(
-                sequence_len,
-                expanded_k.size(2),
-                dtype=torch.bool,
-                device=device,
-            ).tril()
-            scores = scores.masked_fill(~causal_mask[None, None, :, :], float("-inf"))
-        weights = F.softmax(scores.float(), dim=-1).to(dtype=q.dtype)
-        weights = F.dropout(weights, p=dropout_p, training=self.training)
-        return torch.matmul(weights, expanded_v)
 
     def forward(
         self,
@@ -258,28 +208,37 @@ class GroupedQueryAttention(nn.Module):
             attention_mask = attention_mask[None, None, :, :]
 
         dropout_p = self.dropout if self.training else 0.0
-
-        if self.differential_attention:
-            # Split heads into two groups: (softmax(Q1K1) − λ softmax(Q2K2)) V
-            q1, q2 = q.chunk(2, dim=1)
-            k1, k2 = k.chunk(2, dim=1)
-            v1, v2 = v.chunk(2, dim=1)
-            y1 = self._sdpa(
-                q1, k1, v1, attention_mask, is_causal, dropout_p, sequence_len, x.device
+        if hasattr(F, "scaled_dot_product_attention"):
+            y = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attention_mask,
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                enable_gqa=self.n_head != self.n_kv_head,
             )
-            y2 = self._sdpa(
-                q2, k2, v2, attention_mask, is_causal, dropout_p, sequence_len, x.device
-            )
-            y = torch.cat((y1 - self.diff_lambda * y2, y1 - self.diff_lambda * y2), dim=1)
-            # Restore n_head by repeating the differential output for both groups.
-            # Concatenate group outputs instead of repeating:
-            y = torch.cat((y1, y2), dim=1)
-            y = y1 - self.diff_lambda.to(dtype=y1.dtype) * y2
-            y = torch.cat((y, y), dim=1)
         else:
-            y = self._sdpa(
-                q, k, v, attention_mask, is_causal, dropout_p, sequence_len, x.device
+            expanded_k = k.repeat_interleave(self.kv_groups, dim=1)
+            expanded_v = v.repeat_interleave(self.kv_groups, dim=1)
+            scores = torch.matmul(q, expanded_k.transpose(-2, -1)) / math.sqrt(
+                self.head_dim
             )
+            if attention_mask is not None:
+                scores = scores.masked_fill(~attention_mask, float("-inf"))
+            else:
+                causal_mask = torch.ones(
+                    sequence_len,
+                    expanded_k.size(2),
+                    dtype=torch.bool,
+                    device=x.device,
+                ).tril()
+                scores = scores.masked_fill(
+                    ~causal_mask[None, None, :, :], float("-inf")
+                )
+            weights = F.softmax(scores.float(), dim=-1).to(dtype=q.dtype)
+            weights = F.dropout(weights, p=dropout_p, training=self.training)
+            y = torch.matmul(weights, expanded_v)
 
         y = y.transpose(1, 2).contiguous().view(batch_size, sequence_len, -1)
         if self.attn_gate is not None:
@@ -306,7 +265,7 @@ class SwiGLU(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    """Gemma 2 sandwich RMSNorm: pre- and post-norm around sequential attn and MLP."""
+    """Gemma-2 sandwich RMSNorm: pre-norm plus post-norm before residual adds."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -586,12 +545,9 @@ def default_parameter_count() -> int:
     if config.gated_attention:
         attention += config.n_embd * config.n_embd
     mlp = 3 * config.n_embd * config.intermediate_size
-    norms_per_layer = 4 * config.n_embd
+    norms_per_layer = 4 * config.n_embd  # sandwich: pre/post attn + pre/post mlp
     qk_norm = 2 * head_dim if config.qk_norm else 0
-    diff_lambda = 1 if config.differential_attention else 0
-    transformer = config.n_layer * (
-        attention + mlp + norms_per_layer + qk_norm + diff_lambda
-    )
+    transformer = config.n_layer * (attention + mlp + norms_per_layer + qk_norm)
     final_norm = config.n_embd
     output = 0 if config.tie_embeddings else embedding
     return embedding + transformer + final_norm + output

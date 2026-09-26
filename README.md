@@ -9,7 +9,7 @@ training job.
 ## Default architecture
 
 - 24 decoder layers
-- 768 hidden width
+- 768 hidden width/*/-
 - 12 query heads and 4 key/value heads
 - 2,304-wide SwiGLU feed-forward layers
 - 50,304-token tied vocabulary

@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,8 @@ from typing import Any
 
 from checkpointing import checkpoint_paths
 from grok_propose import find_method_paper, load_api_key, propose_architecture
-from papers import append_row, known_ids, utc_now
+from research_notes import context_for_prompt, note_path as research_note_path, set_decision, write_note
+from papers import append_row, known_ids, paper_url, utc_now
 from scores import record_our_run, seed_references
 
 
@@ -311,9 +313,11 @@ def tail_text(path: Path, limit: int = 15) -> str:
     return "\n".join(path.read_text(encoding="utf-8").splitlines()[-limit:])
 
 
-def remember_paper(paper_id: str, title: str, idea: str) -> None:
+def remember_paper(paper_id: str, title: str, idea: str, url: str = "") -> None:
     if not paper_id or paper_id in known_ids(ROOT / "papers.tsv"):
         return
+    if not url and re.fullmatch(r"\d{4}\.\d{4,5}", paper_id):
+        url = paper_url(paper_id)
     append_row(
         ROOT / "papers.tsv",
         {
@@ -323,10 +327,10 @@ def remember_paper(paper_id: str, title: str, idea: str) -> None:
             "venue": "",
             "year": "",
             "status": "read",
-            "idea": idea,
+            "idea": " ".join(idea.split())[:400],
             "run_id": "",
             "notes": "proposed by grok",
-            "url": f"https://huggingface.co/papers/{paper_id}",
+            "url": url,
         },
     )
 
@@ -363,7 +367,7 @@ def main() -> None:
     if not api_key:
         raise SystemExit("XAI_API_KEY is missing from .env")
     snapshot_architecture(args.resume)
-    _log("loop", "each trial searches for a method, then rewrites model.py")
+    _log("loop", "each trial tries one new pretraining idea, then rewrites model.py")
 
     if args.reset:
         if args.ledger.exists():
@@ -422,17 +426,19 @@ def main() -> None:
     accepted = 0
     for index in range(args.iterations):
         trial_papers: list[str] = []
+        note_path = None
+        tried = context_for_prompt()
         try:
+            print(flush=True)
             found = find_method_paper(
                 api_key,
                 results_tail=tail_text(args.ledger),
                 papers_tail=tail_text(ROOT / "papers.tsv"),
                 known=known_ids(ROOT / "papers.tsv"),
+                tried=tried,
             )
-            print(flush=True)
             _log("search", f"{found['arxiv_id']}  {found['title']}")
             _log("", found["query"])
-            remember_paper(found["arxiv_id"], found["title"], found.get("summary") or found["query"])
             arch = propose_architecture(
                 api_key,
                 MODEL_PATH.read_text(encoding="utf-8"),
@@ -440,11 +446,24 @@ def main() -> None:
                 results_tail=tail_text(args.ledger),
                 candidate_json=json.dumps(best, indent=2),
                 best_score=float(best_metrics["score"]),
+                tried=tried,
             )
+            note_path = write_note(
+                research_note_path(arch.paper_id),
+                title=arch.paper_title,
+                abstract=arch.abstract,
+                core_idea=arch.idea,
+                math_basis=arch.math_basis,
+                source="paper",
+                ident=arch.paper_id,
+            )
+            remember_paper(arch.paper_id, arch.paper_title, arch.idea)
             MODEL_PATH.write_text(arch.source, encoding="utf-8")
             architecture_imports()
         except Exception as error:
             restore_architecture()
+            if note_path is not None:
+                set_decision(note_path, "rejected", str(error))
             run_id = f"{session}-trial{index + 1:02d}-search"
             append_crash(args.ledger, run_id, "method search", best, error, [])
             _log("discard", f"{run_id}  {error}")
@@ -453,7 +472,6 @@ def main() -> None:
         mutation = arch.idea
         paper_line = arch.paper_line
         trial_papers = [arch.paper_id]
-        remember_paper(arch.paper_id, arch.paper_title, arch.summary)
         run_id = f"{session}-trial{index + 1:02d}-{short_hash(proposal)}"
         _log("trial", f"{index + 1:02d}  {mutation}")
         if paper_line:
@@ -476,12 +494,20 @@ def main() -> None:
         except Exception as error:
             write_json(args.candidate, best)
             restore_architecture()
+            if note_path is not None:
+                set_decision(note_path, "rejected", str(error))
             append_crash(args.ledger, run_id, mutation, proposal, error, trial_papers)
             _log("discard", f"{index + 1:02d}  {error}")
             continue
 
         improved = metrics["score"] < best_metrics["score"] - MIN_IMPROVEMENT
         status = "keep" if improved else "discard"
+        if note_path is not None:
+            set_decision(
+                note_path,
+                "accepted" if improved else "rejected",
+                _score_text(metrics) + f"    vs best {float(metrics['score']) - float(best_metrics['score']):+.4f}",
+            )
         append_ledger(args.ledger, metrics, status, mutation)
         record_our_run(args.scores, metrics, status)
         delta = float(metrics["score"]) - float(best_metrics["score"])

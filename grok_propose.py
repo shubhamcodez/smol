@@ -39,6 +39,8 @@ class ArchitectureProposal:
     paper_id: str
     paper_title: str
     summary: str
+    abstract: str = ""
+    math_basis: str = ""
 
     @property
     def paper_line(self) -> str:
@@ -210,6 +212,27 @@ def apply_unified_diff(original: str, diff: str) -> str:
     raise RuntimeError(last_error or "git apply failed")
 
 
+def _labeled_sections(text: str) -> dict[str, str]:
+    labels = {"IDEA", "MATH", "TITLE", "ABSTRACT", "PAPER"}
+    found: dict[str, list[str]] = {}
+    current = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            break
+        head = stripped.split(":", 1)[0].strip().upper()
+        if head in labels and (stripped.upper() == head or stripped.upper().startswith(head + ":")):
+            current = head
+            rest = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+            found.setdefault(current, [])
+            if rest:
+                found[current].append(rest)
+            continue
+        if current and stripped:
+            found[current].append(stripped)
+    return {key: " ".join(value).strip() for key, value in found.items()}
+
+
 def _parse_preamble(text: str) -> tuple[str, str, str, str]:
     idea = ""
     paper_id = ""
@@ -271,9 +294,16 @@ def choose_method_query(
     results_tail: str,
     papers_tail: str,
     avoid: str = "",
+    tried: str = "",
 ) -> str:
     """Ask for a search query. The arXiv id comes from search, not from the model."""
     avoid_note = f"\nDo not search for: {avoid}\n" if avoid else ""
+    tried_note = ""
+    if tried.strip():
+        tried_note = (
+            "Ideas already tried. Do not search for these or close paraphrases:\n"
+            f"{tried}\n\n"
+        )
     reply = chat(
         api_key,
         model,
@@ -283,8 +313,10 @@ def choose_method_query(
                 "content": (
                     "You pick a literature search for one method that could lower a small "
                     "language model's pretrain score (bits-per-byte plus benchmark error). "
-                    "Methods include attention, feed-forward, normalization, position encoding, "
-                    "and initialization from models such as Kimi, Qwen, Mistral, DeepSeek, or Gemma. "
+                    "Look for papers that claim a better pretraining loop: the objective, "
+                    "curriculum, data mixing, token weighting, optimizer signal, normalization, "
+                    "or the forward computation. Do not restrict the search to attention "
+                    "variants from well-known model families. "
                     "Do not invent an arXiv id. Reply with one line: QUERY: <search words>"
                 ),
             },
@@ -292,7 +324,8 @@ def choose_method_query(
                 "role": "user",
                 "content": (
                     f"Recent results:\n{results_tail}\n\n"
-                    f"Papers already logged:\n{papers_tail}\n"
+                    f"Papers already logged:\n{papers_tail}\n\n"
+                    f"{tried_note}"
                     f"{avoid_note}"
                     "QUERY:"
                 ),
@@ -315,11 +348,13 @@ def find_method_paper(
     results_tail: str = "",
     papers_tail: str = "",
     known: set[str] | None = None,
+    tried: str = "",
 ) -> dict[str, str]:
     """Search papers for a method. The returned arXiv id is from the search hit."""
     from papers import search_papers
+    from research_notes import existing_ids
 
-    seen = set(known or ())
+    seen = set(known or ()) | existing_ids()
     avoid = ""
     last_query = ""
     for _ in range(3):
@@ -329,6 +364,7 @@ def find_method_paper(
             results_tail=results_tail,
             papers_tail=papers_tail,
             avoid=avoid,
+            tried=tried,
         )
         hits = search_papers(last_query, limit=15)
         for hit in hits:
@@ -366,6 +402,7 @@ def propose_architecture(
     results_tail: str = "",
     candidate_json: str = "",
     best_score: float | None = None,
+    tried: str = "",
 ) -> ArchitectureProposal:
     paper_id = paper["arxiv_id"]
     system = (
@@ -380,9 +417,12 @@ def propose_architecture(
         "and gradient_checkpointing_enable. Vocab size stays 50304. The model must train "
         "with micro-batches on a 6GB GPU. One change only. "
         "Keep every existing parameter name and shape so the current checkpoint still loads. "
-        "Change the computation, not tensor sizes. "
-        "Reply with one header line and a unified diff. Do not return the whole file.\n"
+        "Change the computation, not tensor sizes. A pretraining-loop paper is in scope "
+        "when its idea can live in the loss, the targets, the residual path, or "
+        "configure_optimizer. Do not repeat an idea already listed as tried. "
+        "Reply with the header lines and a unified diff. Do not return the whole file.\n"
         "IDEA: one sentence of what this trial changes\n"
+        "MATH: the equation or update this change implements\n"
         "```diff\n--- a/model.py\n+++ b/model.py\n<unified diff>\n```"
     )
     abstract = (paper.get("summary") or "")[:1200]
@@ -391,6 +431,7 @@ def propose_architecture(
         f"Title: {paper.get('title', '')}\n"
         f"Abstract: {abstract}\n\n"
         f"Best score so far (lower is better): {best_score}\n"
+        f"Ideas already tried:\n{tried or '(none)'}\n\n"
         f"Current candidate.json (size and optimizer; do not spend this trial on these knobs):\n"
         f"{candidate_json}\n\n"
         f"Recent results.tsv:\n{results_tail}\n\n"
@@ -435,10 +476,14 @@ def propose_architecture(
         raise RuntimeError("Grok did not return a usable model.py")
     validate_source(source)
     idea, _ignored_id, _ignored_title, summary = _parse_preamble(reply)
+    sections = _labeled_sections(reply)
+    core = sections.get("IDEA") or idea or "architecture change"
     return ArchitectureProposal(
         source=source,
-        idea=idea or "architecture change",
+        idea=core,
         paper_id=paper["arxiv_id"],
         paper_title=paper.get("title") or "",
-        summary=summary or idea or "architecture change",
+        summary=summary or core,
+        abstract=(paper.get("summary") or "")[:2000],
+        math_basis=sections.get("MATH") or "Not stated.",
     )
